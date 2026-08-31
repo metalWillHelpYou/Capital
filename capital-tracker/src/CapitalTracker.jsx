@@ -63,6 +63,28 @@ const fmtPctPlain = (n) => (Math.abs(n) * 100).toFixed(1) + "%";
 
 const fmtRateRub = (n) => n.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " ₽";
 
+// ---------------------------------------------------------------------------
+// Currency accounts: счета типа "Валюта" хранят остаток и суммы операций в
+// СВОИХ единицах (доллары/евро), а не в рублях. Курс ЦБ (rates.usd/rates.eur,
+// см. TrackerApp) применяется только в момент подсчёта — чтобы включить такой
+// счёт в общий капитал в рублях, где угодно, где он суммируется.
+// ---------------------------------------------------------------------------
+const CURRENCY_CODES = ["USD", "EUR"];
+const CURRENCY_SYMBOL = { USD: "$", EUR: "€" };
+const accountCurrency = (acc) => (acc && acc.type === "Валюта" ? (acc.currency || "USD") : "RUB");
+const rateForCurrency = (code, rates) => (code === "USD" ? rates.usd : code === "EUR" ? rates.eur : 1);
+// amount — число в единицах `code` (или в рублях, если code === "RUB")
+const toRub = (amount, code, rates) => {
+  const n = Number(amount) || 0;
+  if (code === "RUB") return n;
+  const r = rateForCurrency(code, rates);
+  return r ? n * r : 0; // курс ещё не загружен — пока считаем как 0, а не искажаем итог
+};
+const fmtCur = (n, code) => {
+  const sign = n < 0 ? "-" : "";
+  return sign + Math.abs(n).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + (CURRENCY_SYMBOL[code] || code);
+};
+
 const monthKey = (dateStr) => dateStr.slice(0, 7); // "YYYY-MM"
 const monthLabel = (key) => {
   const [y, m] = key.split("-").map(Number);
@@ -88,8 +110,8 @@ const defaultAccounts = () => ([
   { id: uid(), name: "Акции", type: "Акции", opening: 220000 },
   { id: uid(), name: "Облигации", type: "Облигации", opening: 100000 },
   { id: uid(), name: "Подушка", type: "Подушка", opening: 150000 },
-  { id: uid(), name: "Валюта (USD)", type: "Валюта", opening: 90000 },
-  { id: uid(), name: "Валюта (EUR)", type: "Валюта", opening: 60000 },
+  { id: uid(), name: "Валюта (USD)", type: "Валюта", currency: "USD", opening: 1000 },
+  { id: uid(), name: "Валюта (EUR)", type: "Валюта", currency: "EUR", opening: 600 },
 ]);
 
 const defaultTransactions = () => {
@@ -111,7 +133,7 @@ const defaultTransactions = () => {
 
     // февраль 2026
     mk("2026-02-05", "Зарплата", "Зарплата за февраль", 150000, acc.card, "income"),
-    mk("2026-02-18", "Дивиденды", "Дивиденды по валютному счёту", 5000, acc.cur, "income"),
+    mk("2026-02-18", "Дивиденды", "Дивиденды по валютному счёту", 55, acc.cur, "income"),
     mk("2026-02-01", "Аренда", "Аренда квартиры", 45000, acc.card, "expense"),
     mk("2026-02-10", "Продукты и хозтовары", "Продукты за февраль", 24000, acc.cash, "expense"),
     mk("2026-02-12", "Коммунальные платежи", "ЖКХ", 7000, acc.card, "expense"),
@@ -131,7 +153,7 @@ const defaultTransactions = () => {
 
     // апрель 2026
     mk("2026-04-05", "Зарплата", "Зарплата за апрель", 150000, acc.card, "income"),
-    mk("2026-04-12", "Подработка", "Проект на фрилансе", 30000, acc.cur, "income"),
+    mk("2026-04-12", "Подработка", "Проект на фрилансе", 330, acc.cur, "income"),
     mk("2026-04-01", "Аренда", "Аренда квартиры", 45000, acc.card, "expense"),
     mk("2026-04-10", "Продукты и хозтовары", "Продукты за апрель", 23000, acc.cash, "expense"),
     mk("2026-04-14", "Транспорт", "Транспорт", 8500, acc.card, "expense"),
@@ -161,11 +183,11 @@ const defaultTransactions = () => {
 
     // июль 2026
     mk("2026-07-05", "Зарплата", "Зарплата за июль", 150000, acc.card, "income"),
-    mk("2026-07-15", "Дивиденды", "Дивиденды по валютному счёту", 6000, acc.cur, "income"),
+    mk("2026-07-15", "Дивиденды", "Дивиденды по валютному счёту", 65, acc.cur, "income"),
     mk("2026-07-01", "Аренда", "Аренда квартиры", 45000, acc.card, "expense"),
     mk("2026-07-10", "Продукты и хозтовары", "Продукты за июль", 25500, acc.cash, "expense"),
     mk("2026-07-14", "Транспорт", "Транспорт", 8300, acc.card, "expense"),
-    mk("2026-07-20", "Путешествия", "Отпуск", 55000, acc.eur, "expense"),
+    mk("2026-07-20", "Путешествия", "Отпуск", 500, acc.eur, "expense"),
     mk("2026-07-25", "Развлечения", "Развлечения", 9000, acc.cash, "expense"),
     mkT("2026-07-06", acc.card, acc.dep, 35000),
 
@@ -392,22 +414,29 @@ function TrackerApp({ userId, userEmail, onSignOut }) {
   }, [transactions, selectedMonth]);
 
   const currentCapital = useMemo(() => {
-    const sumBy = (pred) => transactions.filter(pred).reduce((s, t) => s + Number(t.amount || 0), 0);
     return accounts.reduce((s, a) => {
-      const inc = sumBy((t) => t.type === "income" && t.account === a.name);
-      const exp = sumBy((t) => t.type === "expense" && t.account === a.name);
-      return s + Number(a.opening || 0) + inc - exp;
+      const code = accountCurrency(a);
+      const sumRub = (pred) => transactions.filter(pred).reduce((sum, t) => sum + toRub(t.amount, code, rates), 0);
+      const openingRub = toRub(a.opening, code, rates);
+      const inc = sumRub((t) => t.type === "income" && t.account === a.name);
+      const exp = sumRub((t) => t.type === "expense" && t.account === a.name);
+      return s + openingRub + inc - exp;
     }, 0);
-  }, [accounts, transactions]);
+  }, [accounts, transactions, rates.usd, rates.eur]);
 
   // capital as of the end of a given month (opening balances + all income/expense up to that date)
   const capitalAtEnd = useCallback((mKeyArg) => {
     const endStr = mKeyArg + "-31";
-    const opening = accounts.reduce((s, a) => s + Number(a.opening || 0), 0);
-    const inc = transactions.filter((t) => t.type === "income" && t.date <= endStr).reduce((s, t) => s + Number(t.amount || 0), 0);
-    const exp = transactions.filter((t) => t.type === "expense" && t.date <= endStr).reduce((s, t) => s + Number(t.amount || 0), 0);
-    return opening + inc - exp;
-  }, [accounts, transactions]);
+    return accounts.reduce((s, a) => {
+      const code = accountCurrency(a);
+      const openingRub = toRub(a.opening, code, rates);
+      const inc = transactions.filter((t) => t.type === "income" && t.account === a.name && t.date <= endStr)
+        .reduce((sum, t) => sum + toRub(t.amount, code, rates), 0);
+      const exp = transactions.filter((t) => t.type === "expense" && t.account === a.name && t.date <= endStr)
+        .reduce((sum, t) => sum + toRub(t.amount, code, rates), 0);
+      return s + openingRub + inc - exp;
+    }, 0);
+  }, [accounts, transactions, rates.usd, rates.eur]);
 
   // % change in capital over the selected period (month / half year / year), for the badge next to the total
   const capitalDelta = useMemo(() => {
@@ -422,8 +451,13 @@ function TrackerApp({ userId, userEmail, onSignOut }) {
   const activeTypeStats = useMemo(() => {
     if (tab !== "income" && tab !== "expense" && tab !== "transfer") return null;
     const list = transactions.filter((t) => t.type === tab);
-    return { count: list.length, total: list.reduce((s, t) => s + Number(t.amount || 0), 0) };
-  }, [transactions, tab]);
+    const total = list.reduce((s, t) => {
+      const accName = tab === "transfer" ? t.fromAccount : t.account;
+      const acc = accounts.find((a) => a.name === accName);
+      return s + toRub(t.amount, accountCurrency(acc), rates);
+    }, 0);
+    return { count: list.length, total };
+  }, [transactions, tab, accounts, rates.usd, rates.eur]);
 
   if (!loaded) {
     return (
@@ -478,6 +512,7 @@ function TrackerApp({ userId, userEmail, onSignOut }) {
               transactions={transactions.filter((t) => t.type === "income")}
               addTransaction={addTransaction}
               deleteTransaction={deleteTransaction}
+              rates={rates}
             />
           )}
           {tab === "expense" && (
@@ -489,6 +524,7 @@ function TrackerApp({ userId, userEmail, onSignOut }) {
               transactions={transactions.filter((t) => t.type === "expense")}
               addTransaction={addTransaction}
               deleteTransaction={deleteTransaction}
+              rates={rates}
             />
           )}
           {tab === "transfer" && (
@@ -497,6 +533,7 @@ function TrackerApp({ userId, userEmail, onSignOut }) {
               transactions={transactions.filter((t) => t.type === "transfer")}
               addTransaction={addTransaction}
               deleteTransaction={deleteTransaction}
+              rates={rates}
             />
           )}
         </div>
@@ -576,11 +613,6 @@ function TopNav({ tab, setTab, period, setPeriod, selectedMonth, setSelectedMont
               e.target.value = "";
             }}
           />
-          {userEmail && (
-            <span className="hidden md:inline text-xs ml-1" style={{ color: COLORS.sub }} title={userEmail}>
-              {userEmail}
-            </span>
-          )}
           <button
             onClick={onSignOut}
             title="Выйти из аккаунта"
@@ -660,18 +692,27 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
   const income = transactions.filter((t) => t.type === "income");
   const expense = transactions.filter((t) => t.type === "expense");
 
-  const sumBy = (list, pred) => list.filter(pred).reduce((s, t) => s + Number(t.amount || 0), 0);
+  const accountByName = useMemo(() => Object.fromEntries(accounts.map((a) => [a.name, a])), [accounts]);
+  // сумма списка операций в рублях — каждая операция конвертируется по валюте
+  // её собственного счёта (для рублёвых счетов toRub просто возвращает как есть)
+  const sumBy = (list, pred) => list.filter(pred).reduce((s, t) => {
+    const code = accountCurrency(accountByName[t.account]);
+    return s + toRub(t.amount, code, rates);
+  }, 0);
 
   const periodKeysArr = (endKey, n) => Array.from({ length: n }, (_, i) => addMonths(endKey, -(n - 1 - i)));
 
   const capitalAtEnd = useCallback((mKeyArg) => {
-    // capital = sum(opening) + income up to end of month - expense up to end of month
+    // capital = sum(opening) + income up to end of month - expense up to end of month, всё в рублях
     const endStr = mKeyArg + "-31"; // string compare works since ISO dates, day overshoot is fine for "<="
-    const opening = accounts.reduce((s, a) => s + Number(a.opening || 0), 0);
-    const inc = sumBy(income, (t) => t.date <= endStr);
-    const exp = sumBy(expense, (t) => t.date <= endStr);
-    return opening + inc - exp;
-  }, [accounts, income, expense]);
+    return accounts.reduce((s, a) => {
+      const code = accountCurrency(a);
+      const openingRub = toRub(a.opening, code, rates);
+      const inc = income.filter((t) => t.account === a.name && t.date <= endStr).reduce((sum, t) => sum + toRub(t.amount, code, rates), 0);
+      const exp = expense.filter((t) => t.account === a.name && t.date <= endStr).reduce((sum, t) => sum + toRub(t.amount, code, rates), 0);
+      return s + openingRub + inc - exp;
+    }, 0);
+  }, [accounts, income, expense, rates.usd, rates.eur]);
 
   const availableMonths = useMemo(() => {
     const set = new Set(transactions.map((t) => monthKey(t.date)));
@@ -697,16 +738,32 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
   const savingsRate = periodIncome ? netIncome / periodIncome : 0;
   const prevSavingsRate = prevPeriodIncome ? prevNetIncome / prevPeriodIncome : 0;
 
-  // current (as-of-now) account balances, independent of selected month
+  // current (as-of-now) account balances, independent of selected month.
+  // Считаем в НАТИВНОЙ валюте счёта (для "Валюта"-счетов — в долларах/евро),
+  // а перевод из другой валюты по дороге переводится через рубли по курсу ЦБ.
   const transfers = transactions.filter((t) => t.type === "transfer");
+  const nativeSum = (list, name, field) => list.filter((t) => t[field] === name).reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  const transferInNative = (acc) => transfers.filter((t) => t.toAccount === acc.name).reduce((s, t) => {
+    const fromAcc = accountByName[t.fromAccount];
+    const fromCode = accountCurrency(fromAcc);
+    const toCode = accountCurrency(acc);
+    if (fromCode === toCode) return s + (Number(t.amount) || 0);
+    const rub = toRub(t.amount, fromCode, rates);
+    const r = rateForCurrency(toCode, rates);
+    return s + (toCode === "RUB" ? rub : r ? rub / r : 0);
+  }, 0);
   const accountBalance = (acc) => {
-    const inc = sumBy(income, (t) => t.account === acc.name);
-    const exp = sumBy(expense, (t) => t.account === acc.name);
-    const transferIn = sumBy(transfers, (t) => t.toAccount === acc.name);
-    const transferOut = sumBy(transfers, (t) => t.fromAccount === acc.name);
-    return Number(acc.opening || 0) + inc - exp + transferIn - transferOut;
+    const inc = nativeSum(income, acc.name, "account");
+    const exp = nativeSum(expense, acc.name, "account");
+    const transferIn = transferInNative(acc);
+    const transferOut = nativeSum(transfers, acc.name, "fromAccount");
+    return Number(acc.opening || 0) + inc - exp + transferIn - transferOut; // в валюте счёта
   };
-  const balances = accounts.map((a) => ({ ...a, balance: accountBalance(a) }));
+  const balances = accounts.map((a) => {
+    const code = accountCurrency(a);
+    const nativeBalance = accountBalance(a);
+    return { ...a, nativeBalance, currencyCode: code, balance: toRub(nativeBalance, code, rates) };
+  });
   const currentCapital = balances.reduce((s, a) => s + a.balance, 0);
 
   const distribution = ACCOUNT_TYPES.map((type) => {
@@ -805,7 +862,7 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
       </div>
 
       {/* динамика + активы по типам — один ряд */}
-      <div className="grid gap-4" style={{ gridTemplateColumns: "1.6fr 1fr" }}>
+      <div className="grid gap-4" style={{ gridTemplateColumns: "2fr 1fr" }}>
         <Card style={{ padding: 20 }}>
           <div className="text-sm font-semibold mb-2">Динамика капитала</div>
           <div style={{ height: 220 }}>
@@ -877,28 +934,33 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
         {balances.length === 0 && (
           <div className="text-sm mb-2" style={{ color: COLORS.sub }}>Пока нет ни одного счёта — добавьте первый ниже.</div>
         )}
-        <div className="space-y-1">
-          {balances.map((a) => (
-            <div key={a.id} className="flex items-center justify-between py-1.5 text-sm group" style={{ borderBottom: `1px solid ${COLORS.border}` }}>
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: TYPE_COLOR[a.type] }} />
-                <span className="truncate font-medium">{a.name}</span>
+        <div>
+          {balances.map((a) => {
+            const isCur = a.currencyCode !== "RUB";
+            return (
+              <div key={a.id} className="grid items-center gap-2 py-1.5 text-sm group" style={{ gridTemplateColumns: "1fr 120px 100px 140px", borderBottom: `1px solid ${COLORS.border}` }}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: TYPE_COLOR[a.type] }} />
+                  <span className="truncate font-medium">{a.name}</span>
+                  {isCur && <span className="text-xs shrink-0" style={{ color: COLORS.sub }}>({a.currencyCode})</span>}
+                </div>
+                <span className="text-xs text-right" style={{ color: COLORS.sub }}>
+                  {isCur ? `Начальный остаток, ${CURRENCY_SYMBOL[a.currencyCode]}` : "Начальный остаток"}
+                </span>
+                <input
+                  type="number"
+                  value={a.opening}
+                  onChange={(e) => updateAccountOpening(a.id, e.target.value)}
+                  className="px-2 py-1 rounded-md text-sm w-full text-right"
+                  style={{ border: `1px solid ${COLORS.border}` }}
+                />
+                <div className="text-right">
+                  <div className="font-semibold tabular-nums">{isCur ? fmtCur(a.nativeBalance, a.currencyCode) : fmtRub(a.balance)}</div>
+                  {isCur && <div className="text-xs tabular-nums" style={{ color: COLORS.sub }}>≈ {fmtRub(a.balance)}</div>}
+                </div>
               </div>
-              <div className="flex items-center gap-3 shrink-0">
-                <label className="text-xs flex items-center gap-1.5" style={{ color: COLORS.sub }}>
-                  Начальный остаток
-                  <input
-                    type="number"
-                    value={a.opening}
-                    onChange={(e) => updateAccountOpening(a.id, e.target.value)}
-                    className="px-2 py-1 rounded-md text-sm w-28 text-right"
-                    style={{ border: `1px solid ${COLORS.border}` }}
-                  />
-                </label>
-                <span className="font-semibold tabular-nums w-28 text-right">{fmtRub(a.balance)}</span>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
         <AddAccountForm onAdd={addAccount} />
       </Card>
@@ -955,10 +1017,12 @@ function StatBlock({ label, value, sub, color, icon: Icon }) {
 function AddAccountForm({ onAdd }) {
   const [name, setName] = useState("");
   const [type, setType] = useState(ACCOUNT_TYPES[0]);
+  const [currency, setCurrency] = useState("USD");
   const [opening, setOpening] = useState(0);
+  const isCur = type === "Валюта";
   const submit = () => {
     if (!name.trim()) return;
-    onAdd({ name: name.trim(), type, opening: Number(opening) });
+    onAdd({ name: name.trim(), type, opening: Number(opening), ...(isCur ? { currency } : {}) });
     setName(""); setOpening(0);
   };
   return (
@@ -968,8 +1032,13 @@ function AddAccountForm({ onAdd }) {
       <select value={type} onChange={(e) => setType(e.target.value)} className="px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }}>
         {ACCOUNT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
       </select>
-      <input type="number" placeholder="Остаток" value={opening} onChange={(e) => setOpening(e.target.value)}
-        className="px-2 py-1.5 rounded-md text-sm w-28" style={{ border: `1px solid ${COLORS.border}` }} />
+      {isCur && (
+        <select value={currency} onChange={(e) => setCurrency(e.target.value)} className="px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }}>
+          {CURRENCY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+      )}
+      <input type="number" placeholder={isCur ? `Остаток, ${CURRENCY_SYMBOL[currency]}` : "Остаток, ₽"} value={opening} onChange={(e) => setOpening(e.target.value)}
+        className="px-2 py-1.5 rounded-md text-sm w-32" style={{ border: `1px solid ${COLORS.border}` }} />
       <button onClick={submit} className="flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium text-white focus:outline-none" style={{ background: COLORS.blue }}>
         <Plus size={14} /> Добавить счёт
       </button>
@@ -980,7 +1049,7 @@ function AddAccountForm({ onAdd }) {
 // ---------------------------------------------------------------------------
 // Income / Expense page (shared component)
 // ---------------------------------------------------------------------------
-function TransactionsPage({ type, title, categories, accounts, transactions, addTransaction, deleteTransaction }) {
+function TransactionsPage({ type, title, categories, accounts, transactions, addTransaction, deleteTransaction, rates }) {
   const isIncome = type === "income";
   const [date, setDate] = useState(todayStr());
   const [category, setCategory] = useState("");
@@ -989,9 +1058,13 @@ function TransactionsPage({ type, title, categories, accounts, transactions, add
   const [account, setAccount] = useState(accounts[0]?.name || "");
 
   const listId = `${type}-categories`;
+  const accountByName = useMemo(() => Object.fromEntries(accounts.map((a) => [a.name, a])), [accounts]);
+  const selectedCode = accountCurrency(accountByName[account]);
+  const isCurAccount = selectedCode !== "RUB";
 
   const sorted = useMemo(() => [...transactions].sort((a, b) => (a.date < b.date ? 1 : -1)), [transactions]);
-  const total = transactions.reduce((s, t) => s + Number(t.amount || 0), 0);
+  // сумма списка в рублях — операции по валютным счетам конвертируются по курсу ЦБ
+  const total = transactions.reduce((s, t) => s + toRub(t.amount, accountCurrency(accountByName[t.account]), rates), 0);
 
   const submit = () => {
     if (!date || !category.trim() || !amount || Number(amount) <= 0) return;
@@ -1005,7 +1078,7 @@ function TransactionsPage({ type, title, categories, accounts, transactions, add
   return (
     <div className="space-y-5">
       <Card style={{ padding: 16 }}>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 items-end">
+        <div className="grid grid-cols-2 gap-2 items-end">
           <Field label="Категория">
             <input list={listId} value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Выберите или впишите"
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }} />
@@ -1017,9 +1090,12 @@ function TransactionsPage({ type, title, categories, accounts, transactions, add
               {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
             </select>
           </Field>
-          <Field label="Сумма, ₽">
+          <Field label={isCurAccount ? `Сумма, ${CURRENCY_SYMBOL[selectedCode]}` : "Сумма, ₽"}>
             <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0"
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }} />
+            {isCurAccount && amount && (
+              <div className="text-xs mt-1" style={{ color: COLORS.sub }}>≈ {fmtRub(toRub(amount, selectedCode, rates))}</div>
+            )}
           </Field>
           <Field label="Дата">
             <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
@@ -1042,7 +1118,10 @@ function TransactionsPage({ type, title, categories, accounts, transactions, add
         {sorted.length === 0 && (
           <div className="px-4 py-8 text-center text-sm" style={{ color: COLORS.sub }}>Пока нет операций — добавьте первую выше.</div>
         )}
-        {sorted.map((t) => (
+        {sorted.map((t) => {
+          const tCode = accountCurrency(accountByName[t.account]);
+          const tIsCur = tCode !== "RUB";
+          return (
           <div key={t.id} className="grid gap-2 px-4 py-2.5 text-sm items-center group" style={{ gridTemplateColumns: "90px 1fr 1.4fr 110px 110px 36px", borderBottom: `1px solid ${COLORS.border}` }}>
             <span style={{ color: COLORS.sub }}>{new Date(t.date).toLocaleDateString("ru-RU")}</span>
             <span>
@@ -1050,12 +1129,16 @@ function TransactionsPage({ type, title, categories, accounts, transactions, add
             </span>
             <span className="truncate" style={{ color: COLORS.sub }}>{t.description || "—"}</span>
             <span className="truncate" style={{ color: COLORS.sub }}>{t.account}</span>
-            <span className="text-right font-medium tabular-nums" style={{ color }}>{fmtRub(t.amount)}</span>
+            <span className="text-right font-medium tabular-nums" style={{ color }}>
+              {tIsCur ? fmtCur(t.amount, tCode) : fmtRub(t.amount)}
+              {tIsCur && <div className="text-xs font-normal" style={{ color: COLORS.sub }}>≈ {fmtRub(toRub(t.amount, tCode, rates))}</div>}
+            </span>
             <button onClick={() => deleteTransaction(t.id)} className="opacity-0 group-hover:opacity-100 justify-self-end focus:outline-none" style={{ color: COLORS.sub }}>
               <Trash2 size={14} />
             </button>
           </div>
-        ))}
+          );
+        })}
       </Card>
     </div>
   );
@@ -1074,24 +1157,41 @@ function Field({ label, children, className = "" }) {
 // Transfer page — переброска денег между счетами (пополнение капитала:
 // накопительный счёт, депозит, акции, ОФЗ и т.п.). Не влияет на доходы/расходы.
 // ---------------------------------------------------------------------------
-function TransferPage({ accounts, transactions, addTransaction, deleteTransaction }) {
+function TransferPage({ accounts, transactions, addTransaction, deleteTransaction, rates }) {
   const [date, setDate] = useState(todayStr());
   const [fromAccount, setFromAccount] = useState(accounts[0]?.name || "");
   const [toAccount, setToAccount] = useState(accounts[1]?.name || accounts[0]?.name || "");
   const [amount, setAmount] = useState("");
 
+  const accountByName = useMemo(() => Object.fromEntries(accounts.map((a) => [a.name, a])), [accounts]);
+  const fromCode = accountCurrency(accountByName[fromAccount]);
+  const toCode = accountCurrency(accountByName[toAccount]);
+  const isCurFrom = fromCode !== "RUB";
+  const crossCurrency = fromCode !== toCode;
+
   const sorted = useMemo(() => [...transactions].sort((a, b) => (a.date < b.date ? 1 : -1)), [transactions]);
 
+  // сумма перевода вводится и хранится в валюте счёта-источника (fromAccount);
+  // если счёт-получатель в другой валюте, конвертация происходит при подсчёте баланса
   const submit = () => {
     if (!date || !fromAccount || !toAccount || fromAccount === toAccount || !amount || Number(amount) <= 0) return;
     addTransaction({ date, fromAccount, toAccount, amount: Number(amount), type: "transfer" });
     setAmount("");
   };
 
+  // во сколько единиц валюты счёта-получателя превратится сумма — для превью при разных валютах
+  const convertedPreview = useMemo(() => {
+    if (!crossCurrency || !amount) return null;
+    const rub = toRub(amount, fromCode, rates);
+    if (toCode === "RUB") return fmtRub(rub);
+    const r = rateForCurrency(toCode, rates);
+    return r ? fmtCur(rub / r, toCode) : null;
+  }, [crossCurrency, amount, fromCode, toCode, rates]);
+
   return (
     <div className="space-y-5">
       <Card style={{ padding: 16 }}>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 items-end">
+        <div className="grid grid-cols-2 gap-2 items-end">
           <Field label="Со счёта">
             <select value={fromAccount} onChange={(e) => setFromAccount(e.target.value)}
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }}>
@@ -1104,9 +1204,12 @@ function TransferPage({ accounts, transactions, addTransaction, deleteTransactio
               {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
             </select>
           </Field>
-          <Field label="Сумма, ₽">
+          <Field label={isCurFrom ? `Сумма, ${CURRENCY_SYMBOL[fromCode]}` : "Сумма, ₽"}>
             <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0"
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }} />
+            {convertedPreview && (
+              <div className="text-xs mt-1" style={{ color: COLORS.sub }}>≈ {convertedPreview} на счёте получателя</div>
+            )}
           </Field>
           <Field label="Дата">
             <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
@@ -1125,17 +1228,24 @@ function TransferPage({ accounts, transactions, addTransaction, deleteTransactio
         {sorted.length === 0 && (
           <div className="px-4 py-8 text-center text-sm" style={{ color: COLORS.sub }}>Пока нет переводов — добавьте первый выше.</div>
         )}
-        {sorted.map((t) => (
+        {sorted.map((t) => {
+          const tCode = accountCurrency(accountByName[t.fromAccount]);
+          const tIsCur = tCode !== "RUB";
+          return (
           <div key={t.id} className="grid gap-2 px-4 py-2.5 text-sm items-center group" style={{ gridTemplateColumns: "90px 1fr 1fr 110px 36px", borderBottom: `1px solid ${COLORS.border}` }}>
             <span style={{ color: COLORS.sub }}>{new Date(t.date).toLocaleDateString("ru-RU")}</span>
             <span className="truncate">{t.fromAccount}</span>
             <span className="truncate">{t.toAccount}</span>
-            <span className="text-right font-medium tabular-nums" style={{ color: COLORS.violet }}>{fmtRub(t.amount)}</span>
+            <span className="text-right font-medium tabular-nums" style={{ color: COLORS.violet }}>
+              {tIsCur ? fmtCur(t.amount, tCode) : fmtRub(t.amount)}
+              {tIsCur && <div className="text-xs font-normal" style={{ color: COLORS.sub }}>≈ {fmtRub(toRub(t.amount, tCode, rates))}</div>}
+            </span>
             <button onClick={() => deleteTransaction(t.id)} className="opacity-0 group-hover:opacity-100 justify-self-end focus:outline-none" style={{ color: COLORS.sub }}>
               <Trash2 size={14} />
             </button>
           </div>
-        ))}
+          );
+        })}
       </Card>
     </div>
   );
