@@ -8,9 +8,15 @@ import {
   LayoutGrid, ArrowDownCircle, ArrowUpCircle, ChevronDown, RefreshCw,
   Download, Upload, LogOut,
 } from "lucide-react";
-import { auth, db } from "./firebase";
-import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+// --- FIREBASE (закомментировано для демо-тестирования без бэкенда) ---------
+// import { auth, db } from "./firebase";
+// import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "firebase/auth";
+// import { doc, getDoc, setDoc } from "firebase/firestore";
+// -----------------------------------------------------------------------------
+// ВАЖНО: перед продакшеном раскомментировать 3 строки выше и убрать/выключить
+// DEMO_MODE ниже, а также вернуть закомментированные блоки в AuthScreen,
+// TrackerApp (загрузка/сохранение в Firestore) и корневом CapitalTracker.
+const DEMO_MODE = true;
 
 // ---------------------------------------------------------------------------
 // Design tokens
@@ -247,33 +253,44 @@ function TrackerApp({ userId, userEmail, onSignOut }) {
   // ---- load from Firestore ----
   // Данные лежат в документе users/{uid} — привязаны к аккаунту, а не к браузеру,
   // поэтому одинаковы на телефоне, ноутбуке — где угодно, где выполнен вход.
+  //
+  // === ДЕМО-РЕЖИМ: ниже вместо реального запроса к Firestore сразу подставляются
+  // тестовые данные (defaultTransactions/defaultAccounts). Оригинальный код
+  // загрузки закомментирован ниже — раскомментировать и удалить демо-блок
+  // перед возвратом к реальному бэкенду. ===
   useEffect(() => {
-    (async () => {
-      try {
-        const snap = await getDoc(doc(db, "users", userId));
-        if (snap.exists()) {
-          const data = snap.data();
-          setTransactions(data.transactions || defaultTransactions());
-          let loadedAccounts = data.accounts || defaultAccounts();
-          if (!loadedAccounts.some((a) => a.type === "Карта")) {
-            loadedAccounts = [{ id: uid(), name: "Карта", type: "Карта", opening: 0 }, ...loadedAccounts];
-          }
-          setAccounts(loadedAccounts);
-          setGoal(typeof data.goal === "number" ? data.goal : 10000000);
-          if (data.rates && (data.rates.usd || data.rates.eur)) {
-            setRates((r) => ({ ...r, usd: data.rates.usd, eur: data.rates.eur, updatedAt: data.rates.updatedAt }));
-          }
-        } else {
-          setTransactions(defaultTransactions());
-          setAccounts(defaultAccounts());
-        }
-      } catch (e) {
-        setTransactions(defaultTransactions());
-        setAccounts(defaultAccounts());
-      } finally {
-        setLoaded(true);
-      }
-    })();
+    if (DEMO_MODE) {
+      setTransactions(defaultTransactions());
+      setAccounts(defaultAccounts());
+      setLoaded(true);
+      return;
+    }
+    // (async () => {
+    //   try {
+    //     const snap = await getDoc(doc(db, "users", userId));
+    //     if (snap.exists()) {
+    //       const data = snap.data();
+    //       setTransactions(data.transactions || defaultTransactions());
+    //       let loadedAccounts = data.accounts || defaultAccounts();
+    //       if (!loadedAccounts.some((a) => a.type === "Карта")) {
+    //         loadedAccounts = [{ id: uid(), name: "Карта", type: "Карта", opening: 0 }, ...loadedAccounts];
+    //       }
+    //       setAccounts(loadedAccounts);
+    //       setGoal(typeof data.goal === "number" ? data.goal : 10000000);
+    //       if (data.rates && (data.rates.usd || data.rates.eur)) {
+    //         setRates((r) => ({ ...r, usd: data.rates.usd, eur: data.rates.eur, updatedAt: data.rates.updatedAt }));
+    //       }
+    //     } else {
+    //       setTransactions(defaultTransactions());
+    //       setAccounts(defaultAccounts());
+    //     }
+    //   } catch (e) {
+    //     setTransactions(defaultTransactions());
+    //     setAccounts(defaultAccounts());
+    //   } finally {
+    //     setLoaded(true);
+    //   }
+    // })();
   }, [userId]);
 
   // ---- USD/EUR → RUB exchange rates (ЦБ РФ, auto-refreshed) ----
@@ -318,9 +335,14 @@ function TrackerApp({ userId, userEmail, onSignOut }) {
     if (latestPayloadRef.current === null) return;
     const payload = latestPayloadRef.current;
     latestPayloadRef.current = null;
-    setDoc(doc(db, "users", userId), payload).catch(() => {
-      // офлайн/сеть недоступна — Firestore сам повторит запись, когда связь восстановится
-    });
+    if (DEMO_MODE) {
+      // ДЕМО: запись в Firestore отключена, данные живут только в памяти вкладки.
+      // console.log("[demo] would save:", payload);
+      return;
+    }
+    // setDoc(doc(db, "users", userId), payload).catch(() => {
+    //   // офлайн/сеть недоступна — Firestore сам повторит запись, когда связь восстановится
+    // });
   }, [userId]);
 
   useEffect(() => {
@@ -470,7 +492,7 @@ function TrackerApp({ userId, userEmail, onSignOut }) {
   return (
     <div style={{ background: COLORS.bg, minHeight: "100%", color: COLORS.text, scrollbarGutter: "stable" }} className="font-sans">
       <style>{`html, body { scrollbar-gutter: stable; }`}</style>
-      <div className="max-w-6xl mx-auto px-4 py-6">
+      <div className="max-w-6xl mx-auto px-3 py-4 sm:px-4 sm:py-6">
         <TopNav
           tab={tab} setTab={setTab}
           period={period} setPeriod={setPeriod}
@@ -485,7 +507,7 @@ function TrackerApp({ userId, userEmail, onSignOut }) {
           userEmail={userEmail}
           onSignOut={onSignOut}
         />
-        <div className="mt-6">
+        <div className="mt-4 sm:mt-6">
           {tab === "summary" && (
             <SummaryPage
               transactions={transactions}
@@ -555,10 +577,10 @@ function TopNav({ tab, setTab, period, setPeriod, selectedMonth, setSelectedMont
   const typeColor = tab === "income" ? COLORS.green : tab === "expense" ? COLORS.red : COLORS.violet;
   const fileInputRef = useRef(null);
   return (
-    <div className="relative flex items-center justify-between flex-wrap gap-3">
-      <div className="flex items-center gap-2">
-        <div className="flex items-center gap-2 mr-4">
-          <div className="flex items-center justify-center rounded-xl" style={{ width: 34, height: 34, background: COLORS.blue }}>
+    <div className="flex flex-col items-center gap-3 lg:relative lg:flex-row lg:items-center lg:justify-between lg:flex-wrap">
+      <div className="flex items-center flex-wrap justify-center gap-2 w-full lg:w-auto">
+        <div className="flex items-center gap-2 mr-1 sm:mr-4">
+          <div className="flex items-center justify-center rounded-xl shrink-0" style={{ width: 34, height: 34, background: COLORS.blue }}>
             <Wallet size={18} color="#fff" />
           </div>
         </div>
@@ -583,7 +605,7 @@ function TopNav({ tab, setTab, period, setPeriod, selectedMonth, setSelectedMont
             );
           })}
         </div>
-        <div className="flex items-center gap-1 ml-2">
+        <div className="flex items-center gap-1 ml-1 sm:ml-2">
           <button
             onClick={exportData}
             title="Скачать резервную копию (JSON)"
@@ -626,20 +648,20 @@ function TopNav({ tab, setTab, period, setPeriod, selectedMonth, setSelectedMont
       </div>
 
       {tab === "summary" && (
-        <span className="absolute left-1/2 -translate-x-1/2 flex items-baseline gap-2">
+        <span className="flex items-baseline gap-2 lg:absolute lg:left-1/2 lg:-translate-x-1/2">
           <span className="text-lg font-bold tabular-nums">{fmtRub(currentCapital)}</span>
           <Delta value={capitalDelta} isPct favorable={true} />
         </span>
       )}
 
       {(tab === "income" || tab === "expense" || tab === "transfer") && (
-        <span className="absolute left-1/2 -translate-x-1/2 text-sm font-medium" style={{ color: COLORS.sub }}>
+        <span className="text-sm font-medium text-center lg:absolute lg:left-1/2 lg:-translate-x-1/2" style={{ color: COLORS.sub }}>
           {activeTypeStats.count} {tab === "income" ? "операций дохода" : tab === "expense" ? "операций расхода" : "переводов"}
         </span>
       )}
 
       {tab === "summary" && (
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap justify-center">
           <div className="flex gap-1 p-1 rounded-lg" style={{ background: "#EDEEF1" }}>
             {[["month", "Месяц"], ["half", "Полгода"], ["year", "Год"]].map(([id, lbl]) => (
               <button
@@ -818,7 +840,7 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
   return (
     <div className="space-y-6">
       {/* компактная строка: лучший/худший месяц, средние доход/расход */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatBlock label="Лучший месяц" value={bestMonth ? monthLabel(bestMonth.key) : "—"} sub={bestMonth ? fmtRubSigned(bestMonth.net) : ""} color={COLORS.green} icon={TrendingUp} />
         <StatBlock label="Худший месяц" value={worstMonth ? monthLabel(worstMonth.key) : "—"} sub={worstMonth ? fmtRubSigned(worstMonth.net) : ""} color={COLORS.red} icon={TrendingDown} />
         <StatBlock label="Средний доход/мес" value={fmtRub(avgIncome)} color={COLORS.blue} icon={ArrowUpCircle} />
@@ -826,7 +848,7 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
       </div>
 
       {/* KPI cards (compact) + recent transactions */}
-      <div className="grid gap-4" style={{ gridTemplateColumns: "2fr 1fr" }}>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
         <div className="grid grid-cols-2 gap-3">
           {kpis.map((k) => (
             <Card key={k.label} style={{ padding: 12 }}>
@@ -862,7 +884,7 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
       </div>
 
       {/* динамика + активы по типам — один ряд */}
-      <div className="grid gap-4" style={{ gridTemplateColumns: "2fr 1fr" }}>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
         <Card style={{ padding: 20 }}>
           <div className="text-sm font-semibold mb-2">Динамика капитала</div>
           <div style={{ height: 220 }}>
@@ -903,7 +925,7 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
       <Card style={{ padding: 20 }}>
         <div className="text-sm font-semibold mb-3">Мои счета</div>
         {accounts.some((a) => a.type === "Валюта") && (
-          <div className="flex items-center flex-wrap gap-x-5 gap-y-1 text-sm px-3 py-2 rounded-lg mb-3" style={{ background: COLORS.bg }}>
+          <div className="flex items-center flex-wrap gap-x-5 gap-y-1.5 text-sm px-3 py-2.5 rounded-lg mb-3" style={{ background: COLORS.bg }}>
             <span className="flex items-center gap-1.5">
               <span className="text-xs" style={{ color: COLORS.sub }}>USD</span>
               <span className="font-semibold tabular-nums">{rates.usd ? fmtRateRub(rates.usd) : "—"}</span>
@@ -938,13 +960,13 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
           {balances.map((a) => {
             const isCur = a.currencyCode !== "RUB";
             return (
-              <div key={a.id} className="grid items-center gap-2 py-1.5 text-sm group" style={{ gridTemplateColumns: "1fr 120px 100px 140px", borderBottom: `1px solid ${COLORS.border}` }}>
-                <div className="flex items-center gap-2 min-w-0">
+              <div key={a.id} className="grid grid-cols-2 items-center gap-x-2 gap-y-1.5 py-2.5 text-sm group sm:grid-cols-[1fr_120px_100px_140px] sm:gap-2 sm:py-1.5" style={{ borderBottom: `1px solid ${COLORS.border}` }}>
+                <div className="flex items-center gap-2 min-w-0 col-span-2 sm:col-span-1">
                   <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: TYPE_COLOR[a.type] }} />
                   <span className="truncate font-medium">{a.name}</span>
                   {isCur && <span className="text-xs shrink-0" style={{ color: COLORS.sub }}>({a.currencyCode})</span>}
                 </div>
-                <span className="text-xs text-right" style={{ color: COLORS.sub }}>
+                <span className="text-xs" style={{ color: COLORS.sub }}>
                   {isCur ? `Начальный остаток, ${CURRENCY_SYMBOL[a.currencyCode]}` : "Начальный остаток"}
                 </span>
                 <input
@@ -954,7 +976,7 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
                   className="px-2 py-1 rounded-md text-sm w-full text-right"
                   style={{ border: `1px solid ${COLORS.border}` }}
                 />
-                <div className="text-right">
+                <div className="text-right col-span-2 sm:col-span-1">
                   <div className="font-semibold tabular-nums">{isCur ? fmtCur(a.nativeBalance, a.currencyCode) : fmtRub(a.balance)}</div>
                   {isCur && <div className="text-xs tabular-nums" style={{ color: COLORS.sub }}>≈ {fmtRub(a.balance)}</div>}
                 </div>
@@ -969,7 +991,7 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
       {/* goal */}
       <Card style={{ padding: 20 }}>
         <div className="text-sm font-semibold mb-3">Цель по капиталу</div>
-        <div className="flex items-center gap-8 flex-wrap">
+        <div className="flex items-center gap-4 sm:gap-8 flex-wrap">
           <div>
             <div className="text-xs mb-1" style={{ color: COLORS.sub }}>Финансовая свобода</div>
             <input
@@ -1026,20 +1048,22 @@ function AddAccountForm({ onAdd }) {
     setName(""); setOpening(0);
   };
   return (
-    <div className="flex items-center gap-2 mt-3 pt-3 flex-wrap" style={{ borderTop: `1px solid ${COLORS.border}` }}>
+    <div className="flex flex-col gap-2 mt-3 pt-3 sm:flex-row sm:items-center sm:flex-wrap" style={{ borderTop: `1px solid ${COLORS.border}` }}>
       <input placeholder="Название счёта" value={name} onChange={(e) => setName(e.target.value)}
-        className="px-2 py-1.5 rounded-md text-sm flex-1" style={{ border: `1px solid ${COLORS.border}`, minWidth: 120 }} />
-      <select value={type} onChange={(e) => setType(e.target.value)} className="px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }}>
-        {ACCOUNT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-      </select>
-      {isCur && (
-        <select value={currency} onChange={(e) => setCurrency(e.target.value)} className="px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }}>
-          {CURRENCY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
+        className="px-2 py-1.5 rounded-md text-sm w-full sm:flex-1" style={{ border: `1px solid ${COLORS.border}`, minWidth: 120 }} />
+      <div className="flex gap-2">
+        <select value={type} onChange={(e) => setType(e.target.value)} className="px-2 py-1.5 rounded-md text-sm flex-1 sm:flex-none" style={{ border: `1px solid ${COLORS.border}` }}>
+          {ACCOUNT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
         </select>
-      )}
+        {isCur && (
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)} className="px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }}>
+            {CURRENCY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        )}
+      </div>
       <input type="number" placeholder={isCur ? `Остаток, ${CURRENCY_SYMBOL[currency]}` : "Остаток, ₽"} value={opening} onChange={(e) => setOpening(e.target.value)}
-        className="px-2 py-1.5 rounded-md text-sm w-32" style={{ border: `1px solid ${COLORS.border}` }} />
-      <button onClick={submit} className="flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium text-white focus:outline-none" style={{ background: COLORS.blue }}>
+        className="px-2 py-1.5 rounded-md text-sm w-full sm:w-32" style={{ border: `1px solid ${COLORS.border}` }} />
+      <button onClick={submit} className="flex items-center justify-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium text-white focus:outline-none w-full sm:w-auto" style={{ background: COLORS.blue }}>
         <Plus size={14} /> Добавить счёт
       </button>
     </div>
@@ -1078,7 +1102,7 @@ function TransactionsPage({ type, title, categories, accounts, transactions, add
   return (
     <div className="space-y-5">
       <Card style={{ padding: 16 }}>
-        <div className="grid grid-cols-2 gap-2 items-end">
+        <div className="grid grid-cols-1 gap-2 items-end sm:grid-cols-2">
           <Field label="Категория">
             <input list={listId} value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Выберите или впишите"
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }} />
@@ -1101,18 +1125,18 @@ function TransactionsPage({ type, title, categories, accounts, transactions, add
             <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }} />
           </Field>
-          <Field label="Описание" className="col-span-2">
+          <Field label="Описание" className="sm:col-span-2">
             <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Необязательно"
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }} />
           </Field>
         </div>
-        <button onClick={submit} className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-white mt-3 focus:outline-none" style={{ background: color }}>
+        <button onClick={submit} className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-white mt-3 focus:outline-none w-full sm:w-auto" style={{ background: color }}>
           <Plus size={15} /> Добавить
         </button>
       </Card>
 
       <Card style={{ padding: 0 }}>
-        <div className="grid gap-2 px-4 py-2.5 text-xs font-semibold" style={{ gridTemplateColumns: "90px 1fr 1.4fr 110px 110px 36px", color: COLORS.sub, borderBottom: `1px solid ${COLORS.border}` }}>
+        <div className="hidden sm:grid gap-2 px-4 py-2.5 text-xs font-semibold" style={{ gridTemplateColumns: "90px 1fr 1.4fr 110px 110px 36px", color: COLORS.sub, borderBottom: `1px solid ${COLORS.border}` }}>
           <span>Дата</span><span>Категория</span><span>Описание</span><span>Счёт</span><span className="text-right">Сумма</span><span />
         </div>
         {sorted.length === 0 && (
@@ -1122,20 +1146,44 @@ function TransactionsPage({ type, title, categories, accounts, transactions, add
           const tCode = accountCurrency(accountByName[t.account]);
           const tIsCur = tCode !== "RUB";
           return (
-          <div key={t.id} className="grid gap-2 px-4 py-2.5 text-sm items-center group" style={{ gridTemplateColumns: "90px 1fr 1.4fr 110px 110px 36px", borderBottom: `1px solid ${COLORS.border}` }}>
-            <span style={{ color: COLORS.sub }}>{new Date(t.date).toLocaleDateString("ru-RU")}</span>
-            <span>
-              <span className="text-xs px-2 py-0.5 rounded-full" style={{ color, background: bg }}>{t.category}</span>
-            </span>
-            <span className="truncate" style={{ color: COLORS.sub }}>{t.description || "—"}</span>
-            <span className="truncate" style={{ color: COLORS.sub }}>{t.account}</span>
-            <span className="text-right font-medium tabular-nums" style={{ color }}>
-              {tIsCur ? fmtCur(t.amount, tCode) : fmtRub(t.amount)}
-              {tIsCur && <div className="text-xs font-normal" style={{ color: COLORS.sub }}>≈ {fmtRub(toRub(t.amount, tCode, rates))}</div>}
-            </span>
-            <button onClick={() => deleteTransaction(t.id)} className="opacity-0 group-hover:opacity-100 justify-self-end focus:outline-none" style={{ color: COLORS.sub }}>
-              <Trash2 size={14} />
-            </button>
+          <div key={t.id}>
+            {/* мобильная карточка операции */}
+            <div className="sm:hidden flex items-start justify-between gap-3 px-4 py-3 group" style={{ borderBottom: `1px solid ${COLORS.border}` }}>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                  <span className="text-xs px-2 py-0.5 rounded-full" style={{ color, background: bg }}>{t.category}</span>
+                  <span className="text-xs" style={{ color: COLORS.sub }}>{new Date(t.date).toLocaleDateString("ru-RU")}</span>
+                </div>
+                <div className="truncate text-xs" style={{ color: COLORS.sub }}>{t.account}{t.description ? ` · ${t.description}` : ""}</div>
+              </div>
+              <div className="flex items-start gap-2 shrink-0">
+                <div className="text-right">
+                  <div className="font-medium tabular-nums text-sm" style={{ color }}>
+                    {tIsCur ? fmtCur(t.amount, tCode) : fmtRub(t.amount)}
+                  </div>
+                  {tIsCur && <div className="text-xs font-normal" style={{ color: COLORS.sub }}>≈ {fmtRub(toRub(t.amount, tCode, rates))}</div>}
+                </div>
+                <button onClick={() => deleteTransaction(t.id)} className="focus:outline-none mt-0.5" style={{ color: COLORS.sub }}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+            {/* десктопная строка-таблица */}
+            <div className="hidden sm:grid gap-2 px-4 py-2.5 text-sm items-center group" style={{ gridTemplateColumns: "90px 1fr 1.4fr 110px 110px 36px", borderBottom: `1px solid ${COLORS.border}` }}>
+              <span style={{ color: COLORS.sub }}>{new Date(t.date).toLocaleDateString("ru-RU")}</span>
+              <span>
+                <span className="text-xs px-2 py-0.5 rounded-full" style={{ color, background: bg }}>{t.category}</span>
+              </span>
+              <span className="truncate" style={{ color: COLORS.sub }}>{t.description || "—"}</span>
+              <span className="truncate" style={{ color: COLORS.sub }}>{t.account}</span>
+              <span className="text-right font-medium tabular-nums" style={{ color }}>
+                {tIsCur ? fmtCur(t.amount, tCode) : fmtRub(t.amount)}
+                {tIsCur && <div className="text-xs font-normal" style={{ color: COLORS.sub }}>≈ {fmtRub(toRub(t.amount, tCode, rates))}</div>}
+              </span>
+              <button onClick={() => deleteTransaction(t.id)} className="opacity-0 group-hover:opacity-100 justify-self-end focus:outline-none" style={{ color: COLORS.sub }}>
+                <Trash2 size={14} />
+              </button>
+            </div>
           </div>
           );
         })}
@@ -1191,7 +1239,7 @@ function TransferPage({ accounts, transactions, addTransaction, deleteTransactio
   return (
     <div className="space-y-5">
       <Card style={{ padding: 16 }}>
-        <div className="grid grid-cols-2 gap-2 items-end">
+        <div className="grid grid-cols-1 gap-2 items-end sm:grid-cols-2">
           <Field label="Со счёта">
             <select value={fromAccount} onChange={(e) => setFromAccount(e.target.value)}
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }}>
@@ -1216,13 +1264,13 @@ function TransferPage({ accounts, transactions, addTransaction, deleteTransactio
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }} />
           </Field>
         </div>
-        <button onClick={submit} className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-white mt-3 focus:outline-none" style={{ background: COLORS.violet }}>
+        <button onClick={submit} className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-white mt-3 focus:outline-none w-full sm:w-auto" style={{ background: COLORS.violet }}>
           <Plus size={15} /> Добавить
         </button>
       </Card>
 
       <Card style={{ padding: 0 }}>
-        <div className="grid gap-2 px-4 py-2.5 text-xs font-semibold" style={{ gridTemplateColumns: "90px 1fr 1fr 110px 36px", color: COLORS.sub, borderBottom: `1px solid ${COLORS.border}` }}>
+        <div className="hidden sm:grid gap-2 px-4 py-2.5 text-xs font-semibold" style={{ gridTemplateColumns: "90px 1fr 1fr 110px 36px", color: COLORS.sub, borderBottom: `1px solid ${COLORS.border}` }}>
           <span>Дата</span><span>Со счёта</span><span>На счёт</span><span className="text-right">Сумма</span><span />
         </div>
         {sorted.length === 0 && (
@@ -1232,17 +1280,38 @@ function TransferPage({ accounts, transactions, addTransaction, deleteTransactio
           const tCode = accountCurrency(accountByName[t.fromAccount]);
           const tIsCur = tCode !== "RUB";
           return (
-          <div key={t.id} className="grid gap-2 px-4 py-2.5 text-sm items-center group" style={{ gridTemplateColumns: "90px 1fr 1fr 110px 36px", borderBottom: `1px solid ${COLORS.border}` }}>
-            <span style={{ color: COLORS.sub }}>{new Date(t.date).toLocaleDateString("ru-RU")}</span>
-            <span className="truncate">{t.fromAccount}</span>
-            <span className="truncate">{t.toAccount}</span>
-            <span className="text-right font-medium tabular-nums" style={{ color: COLORS.violet }}>
-              {tIsCur ? fmtCur(t.amount, tCode) : fmtRub(t.amount)}
-              {tIsCur && <div className="text-xs font-normal" style={{ color: COLORS.sub }}>≈ {fmtRub(toRub(t.amount, tCode, rates))}</div>}
-            </span>
-            <button onClick={() => deleteTransaction(t.id)} className="opacity-0 group-hover:opacity-100 justify-self-end focus:outline-none" style={{ color: COLORS.sub }}>
-              <Trash2 size={14} />
-            </button>
+          <div key={t.id}>
+            {/* мобильная карточка перевода */}
+            <div className="sm:hidden flex items-start justify-between gap-3 px-4 py-3 group" style={{ borderBottom: `1px solid ${COLORS.border}` }}>
+              <div className="min-w-0">
+                <div className="text-xs mb-1" style={{ color: COLORS.sub }}>{new Date(t.date).toLocaleDateString("ru-RU")}</div>
+                <div className="text-sm truncate">{t.fromAccount} <span style={{ color: COLORS.sub }}>→</span> {t.toAccount}</div>
+              </div>
+              <div className="flex items-start gap-2 shrink-0">
+                <div className="text-right">
+                  <div className="font-medium tabular-nums text-sm" style={{ color: COLORS.violet }}>
+                    {tIsCur ? fmtCur(t.amount, tCode) : fmtRub(t.amount)}
+                  </div>
+                  {tIsCur && <div className="text-xs font-normal" style={{ color: COLORS.sub }}>≈ {fmtRub(toRub(t.amount, tCode, rates))}</div>}
+                </div>
+                <button onClick={() => deleteTransaction(t.id)} className="focus:outline-none mt-0.5" style={{ color: COLORS.sub }}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+            {/* десктопная строка-таблица */}
+            <div className="hidden sm:grid gap-2 px-4 py-2.5 text-sm items-center group" style={{ gridTemplateColumns: "90px 1fr 1fr 110px 36px", borderBottom: `1px solid ${COLORS.border}` }}>
+              <span style={{ color: COLORS.sub }}>{new Date(t.date).toLocaleDateString("ru-RU")}</span>
+              <span className="truncate">{t.fromAccount}</span>
+              <span className="truncate">{t.toAccount}</span>
+              <span className="text-right font-medium tabular-nums" style={{ color: COLORS.violet }}>
+                {tIsCur ? fmtCur(t.amount, tCode) : fmtRub(t.amount)}
+                {tIsCur && <div className="text-xs font-normal" style={{ color: COLORS.sub }}>≈ {fmtRub(toRub(t.amount, tCode, rates))}</div>}
+              </span>
+              <button onClick={() => deleteTransaction(t.id)} className="opacity-0 group-hover:opacity-100 justify-self-end focus:outline-none" style={{ color: COLORS.sub }}>
+                <Trash2 size={14} />
+              </button>
+            </div>
           </div>
           );
         })}
@@ -1346,36 +1415,51 @@ function AuthScreen() {
 // ---------------------------------------------------------------------------
 // Root component — следит за состоянием входа Firebase Auth и показывает
 // либо экран входа, либо сам трекер (уже привязанный к конкретному аккаунту).
+//
+// === ДЕМО-РЕЖИМ: авторизация Firebase отключена, сразу подставляется тестовый
+// пользователь и рендерится трекер, минуя AuthScreen. Оригинальная логика
+// (onAuthStateChanged + экран входа) закомментирована ниже — раскомментировать
+// и удалить демо-ветку, когда Firebase снова будет подключён. ===
 // ---------------------------------------------------------------------------
 export default function CapitalTracker() {
-  const [authLoading, setAuthLoading] = useState(true);
-  const [user, setUser] = useState(null);
-
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setAuthLoading(false);
-    });
-    return unsub;
-  }, []);
-
-  if (authLoading) {
+  if (DEMO_MODE) {
     return (
-      <div className="flex items-center justify-center h-64" style={{ color: COLORS.sub }}>
-        Загрузка…
-      </div>
+      <TrackerApp
+        userId="demo-user"
+        userEmail="demo@example.com"
+        onSignOut={() => alert("Демо-режим: выход отключён, Firebase не подключён.")}
+      />
     );
   }
 
-  if (!user) {
-    return <AuthScreen />;
-  }
-
-  return (
-    <TrackerApp
-      userId={user.uid}
-      userEmail={user.email}
-      onSignOut={() => signOut(auth)}
-    />
-  );
+  // const [authLoading, setAuthLoading] = useState(true);
+  // const [user, setUser] = useState(null);
+  //
+  // useEffect(() => {
+  //   const unsub = onAuthStateChanged(auth, (u) => {
+  //     setUser(u);
+  //     setAuthLoading(false);
+  //   });
+  //   return unsub;
+  // }, []);
+  //
+  // if (authLoading) {
+  //   return (
+  //     <div className="flex items-center justify-center h-64" style={{ color: COLORS.sub }}>
+  //       Загрузка…
+  //     </div>
+  //   );
+  // }
+  //
+  // if (!user) {
+  //   return <AuthScreen />;
+  // }
+  //
+  // return (
+  //   <TrackerApp
+  //     userId={user.uid}
+  //     userEmail={user.email}
+  //     onSignOut={() => signOut(auth)}
+  //   />
+  // );
 }
