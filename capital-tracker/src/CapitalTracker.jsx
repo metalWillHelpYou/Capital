@@ -63,6 +63,22 @@ const fmtPctPlain = (n) => (Math.abs(n) * 100).toFixed(1) + "%";
 
 const fmtRateRub = (n) => n.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " ₽";
 
+// compact axis label: 0..999 as-is, 1k..999k as "Nk", 1M+ as "N.NM"
+const fmtCompact = (v) => {
+  const abs = Math.abs(v);
+  if (abs >= 1000000) return (v / 1000000).toFixed(abs % 1000000 === 0 ? 0 : 1) + "M";
+  if (abs >= 1000) return Math.round(v / 1000) + "k";
+  return String(Math.round(v));
+};
+
+// левое выравнивание подписей оси Y — по умолчанию Recharts прижимает их
+// вправо (к линиям сетки), из-за чего цифры съезжают от заголовка карточки
+const YAxisTickLeft = ({ y, payload }) => (
+  <text x={0} y={y} dy={4} textAnchor="start" fontSize={11} fill={COLORS.sub}>
+    {fmtCompact(payload.value)}
+  </text>
+);
+
 // ---------------------------------------------------------------------------
 // Currency accounts: счета типа "Валюта" хранят остаток и суммы операций в
 // СВОИХ единицах (доллары/евро), а не в рублях. Курс ЦБ (rates.usd/rates.eur,
@@ -556,7 +572,7 @@ function TopNav({ tab, setTab, period, setPeriod, selectedMonth, setSelectedMont
   const fileInputRef = useRef(null);
   return (
     <div className="flex flex-col items-center gap-3 lg:relative lg:flex-row lg:items-center lg:justify-between lg:flex-wrap">
-      <div className="flex items-center flex-wrap justify-center gap-2 w-full lg:w-auto">
+      <div className="flex items-center flex-wrap justify-center gap-2">
         <div className="flex items-center gap-2 mr-1 sm:mr-4">
           <div className="flex items-center justify-center rounded-xl shrink-0" style={{ width: 34, height: 34, background: COLORS.blue }}>
             <Wallet size={18} color="#fff" />
@@ -867,10 +883,16 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
           <div className="text-sm font-semibold mb-2">Динамика капитала</div>
           <div style={{ height: 220 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={history} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
+              <LineChart data={history} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} vertical={false} />
                 <XAxis dataKey="label" tick={{ fontSize: 11, fill: COLORS.sub }} axisLine={{ stroke: COLORS.border }} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: COLORS.sub }} axisLine={false} tickLine={false} tickFormatter={(v) => (v / 1000).toFixed(0) + "k"} width={44} />
+                <YAxis
+                  tick={<YAxisTickLeft />}
+                  axisLine={false}
+                  tickLine={false}
+                  tickFormatter={fmtCompact}
+                  width={54}
+                />
                 <Tooltip formatter={(v) => fmtRub(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${COLORS.border}`, fontSize: 12 }} />
                 <Line type="monotone" dataKey="capital" stroke={COLORS.green} strokeWidth={2.5} dot={{ r: 3, fill: COLORS.green }} activeDot={{ r: 5 }} name="Капитал" isAnimationActive={false} />
               </LineChart>
