@@ -8,15 +8,9 @@ import {
   LayoutGrid, ArrowDownCircle, ArrowUpCircle, ChevronDown, RefreshCw,
   Download, Upload, LogOut,
 } from "lucide-react";
-// --- FIREBASE (закомментировано для демо-тестирования без бэкенда) ---------
-// import { auth, db } from "./firebase";
-// import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "firebase/auth";
-// import { doc, getDoc, setDoc } from "firebase/firestore";
-// -----------------------------------------------------------------------------
-// ВАЖНО: перед продакшеном раскомментировать 3 строки выше и убрать/выключить
-// DEMO_MODE ниже, а также вернуть закомментированные блоки в AuthScreen,
-// TrackerApp (загрузка/сохранение в Firestore) и корневом CapitalTracker.
-const DEMO_MODE = true;
+import { auth, db } from "./firebase";
+import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "firebase/auth";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 
 // ---------------------------------------------------------------------------
 // Design tokens
@@ -253,44 +247,33 @@ function TrackerApp({ userId, userEmail, onSignOut }) {
   // ---- load from Firestore ----
   // Данные лежат в документе users/{uid} — привязаны к аккаунту, а не к браузеру,
   // поэтому одинаковы на телефоне, ноутбуке — где угодно, где выполнен вход.
-  //
-  // === ДЕМО-РЕЖИМ: ниже вместо реального запроса к Firestore сразу подставляются
-  // тестовые данные (defaultTransactions/defaultAccounts). Оригинальный код
-  // загрузки закомментирован ниже — раскомментировать и удалить демо-блок
-  // перед возвратом к реальному бэкенду. ===
   useEffect(() => {
-    if (DEMO_MODE) {
-      setTransactions(defaultTransactions());
-      setAccounts(defaultAccounts());
-      setLoaded(true);
-      return;
-    }
-    // (async () => {
-    //   try {
-    //     const snap = await getDoc(doc(db, "users", userId));
-    //     if (snap.exists()) {
-    //       const data = snap.data();
-    //       setTransactions(data.transactions || defaultTransactions());
-    //       let loadedAccounts = data.accounts || defaultAccounts();
-    //       if (!loadedAccounts.some((a) => a.type === "Карта")) {
-    //         loadedAccounts = [{ id: uid(), name: "Карта", type: "Карта", opening: 0 }, ...loadedAccounts];
-    //       }
-    //       setAccounts(loadedAccounts);
-    //       setGoal(typeof data.goal === "number" ? data.goal : 10000000);
-    //       if (data.rates && (data.rates.usd || data.rates.eur)) {
-    //         setRates((r) => ({ ...r, usd: data.rates.usd, eur: data.rates.eur, updatedAt: data.rates.updatedAt }));
-    //       }
-    //     } else {
-    //       setTransactions(defaultTransactions());
-    //       setAccounts(defaultAccounts());
-    //     }
-    //   } catch (e) {
-    //     setTransactions(defaultTransactions());
-    //     setAccounts(defaultAccounts());
-    //   } finally {
-    //     setLoaded(true);
-    //   }
-    // })();
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, "users", userId));
+        if (snap.exists()) {
+          const data = snap.data();
+          setTransactions(data.transactions || defaultTransactions());
+          let loadedAccounts = data.accounts || defaultAccounts();
+          if (!loadedAccounts.some((a) => a.type === "Карта")) {
+            loadedAccounts = [{ id: uid(), name: "Карта", type: "Карта", opening: 0 }, ...loadedAccounts];
+          }
+          setAccounts(loadedAccounts);
+          setGoal(typeof data.goal === "number" ? data.goal : 10000000);
+          if (data.rates && (data.rates.usd || data.rates.eur)) {
+            setRates((r) => ({ ...r, usd: data.rates.usd, eur: data.rates.eur, updatedAt: data.rates.updatedAt }));
+          }
+        } else {
+          setTransactions(defaultTransactions());
+          setAccounts(defaultAccounts());
+        }
+      } catch (e) {
+        setTransactions(defaultTransactions());
+        setAccounts(defaultAccounts());
+      } finally {
+        setLoaded(true);
+      }
+    })();
   }, [userId]);
 
   // ---- USD/EUR → RUB exchange rates (ЦБ РФ, auto-refreshed) ----
@@ -335,14 +318,9 @@ function TrackerApp({ userId, userEmail, onSignOut }) {
     if (latestPayloadRef.current === null) return;
     const payload = latestPayloadRef.current;
     latestPayloadRef.current = null;
-    if (DEMO_MODE) {
-      // ДЕМО: запись в Firestore отключена, данные живут только в памяти вкладки.
-      // console.log("[demo] would save:", payload);
-      return;
-    }
-    // setDoc(doc(db, "users", userId), payload).catch(() => {
-    //   // офлайн/сеть недоступна — Firestore сам повторит запись, когда связь восстановится
-    // });
+    setDoc(doc(db, "users", userId), payload).catch(() => {
+      // офлайн/сеть недоступна — Firestore сам повторит запись, когда связь восстановится
+    });
   }, [userId]);
 
   useEffect(() => {
@@ -1415,51 +1393,36 @@ function AuthScreen() {
 // ---------------------------------------------------------------------------
 // Root component — следит за состоянием входа Firebase Auth и показывает
 // либо экран входа, либо сам трекер (уже привязанный к конкретному аккаунту).
-//
-// === ДЕМО-РЕЖИМ: авторизация Firebase отключена, сразу подставляется тестовый
-// пользователь и рендерится трекер, минуя AuthScreen. Оригинальная логика
-// (onAuthStateChanged + экран входа) закомментирована ниже — раскомментировать
-// и удалить демо-ветку, когда Firebase снова будет подключён. ===
 // ---------------------------------------------------------------------------
 export default function CapitalTracker() {
-  if (DEMO_MODE) {
+  const [authLoading, setAuthLoading] = useState(true);
+  const [user, setUser] = useState(null);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setAuthLoading(false);
+    });
+    return unsub;
+  }, []);
+
+  if (authLoading) {
     return (
-      <TrackerApp
-        userId="demo-user"
-        userEmail="demo@example.com"
-        onSignOut={() => alert("Демо-режим: выход отключён, Firebase не подключён.")}
-      />
+      <div className="flex items-center justify-center h-64" style={{ color: COLORS.sub }}>
+        Загрузка…
+      </div>
     );
   }
 
-  // const [authLoading, setAuthLoading] = useState(true);
-  // const [user, setUser] = useState(null);
-  //
-  // useEffect(() => {
-  //   const unsub = onAuthStateChanged(auth, (u) => {
-  //     setUser(u);
-  //     setAuthLoading(false);
-  //   });
-  //   return unsub;
-  // }, []);
-  //
-  // if (authLoading) {
-  //   return (
-  //     <div className="flex items-center justify-center h-64" style={{ color: COLORS.sub }}>
-  //       Загрузка…
-  //     </div>
-  //   );
-  // }
-  //
-  // if (!user) {
-  //   return <AuthScreen />;
-  // }
-  //
-  // return (
-  //   <TrackerApp
-  //     userId={user.uid}
-  //     userEmail={user.email}
-  //     onSignOut={() => signOut(auth)}
-  //   />
-  // );
+  if (!user) {
+    return <AuthScreen />;
+  }
+
+  return (
+    <TrackerApp
+      userId={user.uid}
+      userEmail={user.email}
+      onSignOut={() => signOut(auth)}
+    />
+  );
 }
