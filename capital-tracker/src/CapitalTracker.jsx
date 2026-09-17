@@ -6,7 +6,7 @@ import {
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Trash2, Plus,
   LayoutGrid, ArrowDownCircle, ArrowUpCircle, ChevronDown,
-  Download, Upload, LogOut, Sun, Moon,
+  Download, Upload, LogOut, Sun, Moon, BarChart2, PieChart as PieChartIcon,
 } from "lucide-react";
 import { auth, db } from "./firebase";
 import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "firebase/auth";
@@ -111,22 +111,42 @@ const EXPENSE_CATS = ["Аренда", "Коммунальные платежи",
 
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
+// Копейки показываем только когда они реально есть в сумме — так "1 234 ₽"
+// остаётся коротким, а "1 234,56 ₽" не теряет копейки, как было раньше из-за
+// Math.round. rubDecimals(n) возвращает 0 либо 2 — сколько знаков после запятой
+// показать для конкретного числа.
+const rubDecimals = (n) => (Math.round(Math.abs(n) * 100) % 100 === 0 ? 0 : 2);
+
 const fmtRub = (n) => {
   const sign = n < 0 ? "-" : "";
-  return sign + Math.round(Math.abs(n)).toLocaleString("ru-RU") + " ₽";
+  return sign + Math.abs(n).toLocaleString("ru-RU", { minimumFractionDigits: rubDecimals(n), maximumFractionDigits: 2 }) + " ₽";
 };
-const fmtRubSigned = (n) => (n > 0 ? "+" : n < 0 ? "-" : "") + Math.round(Math.abs(n)).toLocaleString("ru-RU") + " ₽";
+const fmtRubSigned = (n) => (n > 0 ? "+" : n < 0 ? "-" : "") + Math.abs(n).toLocaleString("ru-RU", { minimumFractionDigits: rubDecimals(n), maximumFractionDigits: 2 }) + " ₽";
 // те же форматтеры, но без символа ₽ — используются в блоке "Мои счета",
 // где рублёвая сумма понятна из контекста и без символа
 const fmtRubNoSym = (n) => {
   const sign = n < 0 ? "-" : "";
-  return sign + Math.round(Math.abs(n)).toLocaleString("ru-RU");
+  return sign + Math.abs(n).toLocaleString("ru-RU", { minimumFractionDigits: rubDecimals(n), maximumFractionDigits: 2 });
 };
-const fmtRubSignedNoSym = (n) => (n > 0 ? "+" : n < 0 ? "-" : "") + Math.round(Math.abs(n)).toLocaleString("ru-RU");
+const fmtRubSignedNoSym = (n) => (n > 0 ? "+" : n < 0 ? "-" : "") + Math.abs(n).toLocaleString("ru-RU", { minimumFractionDigits: rubDecimals(n), maximumFractionDigits: 2 });
 const fmtPct = (n) => (n > 0 ? "+" : n < 0 ? "-" : "") + Math.abs(n * 100).toFixed(1) + "%";
 const fmtPctPlain = (n) => (Math.abs(n) * 100).toFixed(1) + "%";
 
-const fmtRateRub = (n) => n.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " ₽";
+// Категория — свободный текст с автодополнением, но цифры в названии категории
+// не нужны (это не сумма и не дата), поэтому убираем их прямо при вводе.
+const sanitizeCategoryInput = (raw) => raw.replace(/[0-9]/g, "");
+
+// Поле суммы — текстовое, а не number: на телефоне с русской раскладкой люди
+// печатают копейки через запятую, а <input type="number"> valid только с
+// точкой (и на iOS/Android для type="number" не всегда всплывает клавиша
+// разделителя). Здесь запятую переводим в точку и не даём ввести второй
+// разделитель/буквы, так что value всегда остаётся валидным для Number(...).
+const sanitizeAmountInput = (raw) => {
+  let v = raw.replace(/,/g, ".").replace(/[^0-9.]/g, "");
+  const dot = v.indexOf(".");
+  if (dot !== -1) v = v.slice(0, dot + 1) + v.slice(dot + 1).replace(/\./g, "");
+  return v;
+};
 
 // compact axis label: 0..999 as-is, 1k..999k as "Nk", 1M+ as "N.NM"
 const fmtCompact = (v) => {
@@ -165,6 +185,41 @@ const fmtCur = (n, code) => {
   const sign = n < 0 ? "-" : "";
   return sign + Math.abs(n).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + (CURRENCY_SYMBOL[code] || code);
 };
+
+// ---------------------------------------------------------------------------
+// Round-up savings ("округление покупок") — по образцу банковской фичи: после
+// каждой покупки с указанного счёта разница между суммой и ближайшим "круглым"
+// числом сверху автоматически переводится на накопительный счёт. Шаг округления
+// зависит от режима: фиксированный (10/50/100 ₽) либо "умный" — растёт вместе
+// с суммой покупки, как в примере пользователя.
+// ---------------------------------------------------------------------------
+const SMART_ROUND_STEPS = [
+  { lessThan: 50, step: 10 },
+  { lessThan: 300, step: 50 },
+  { lessThan: 2000, step: 100 },
+  { lessThan: 10000, step: 500 },
+  { lessThan: Infinity, step: 1000 },
+];
+const smartStepFor = (amount) => (SMART_ROUND_STEPS.find((r) => amount < r.lessThan) || SMART_ROUND_STEPS[SMART_ROUND_STEPS.length - 1]).step;
+
+// mode: "off" | "smart" | "10" | "50" | "100"
+const computeRoundUp = (amount, mode) => {
+  if (!mode || mode === "off" || !(amount > 0)) return 0;
+  const step = mode === "smart" ? smartStepFor(amount) : Number(mode);
+  if (!step) return 0;
+  const rounded = Math.ceil(amount / step) * step;
+  return Math.round((rounded - amount) * 100) / 100;
+};
+
+const ROUND_UP_MODES = [
+  { id: "off", label: "Выкл" },
+  { id: "smart", label: "Умный шаг" },
+  { id: "10", label: "10 ₽" },
+  { id: "50", label: "50 ₽" },
+  { id: "100", label: "100 ₽" },
+];
+
+const defaultRoundUp = () => ({ enabled: false, mode: "smart", sourceAccount: "Карта", targetAccount: "Накопительный счет" });
 
 const monthKey = (dateStr) => dateStr.slice(0, 7); // "YYYY-MM"
 const monthLabel = (key) => {
@@ -255,6 +310,7 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
   const [transactions, setTransactions] = useState([]);
   const [accounts, setAccounts] = useState([]);
   const [goal, setGoal] = useState(10000000);
+  const [roundUp, setRoundUp] = useState(defaultRoundUp());
   const [selectedMonth, setSelectedMonth] = useState(null);
   const [period, setPeriod] = useState("month"); // 'month' | 'half' | 'year'
 
@@ -285,12 +341,14 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
           setTransactions(data.transactions || defaultTransactions());
           setAccounts(normalizeAccounts(data.accounts));
           setGoal(typeof data.goal === "number" ? data.goal : 10000000);
+          setRoundUp((r) => (data.roundUp && typeof data.roundUp === "object" ? { ...r, ...data.roundUp } : defaultRoundUp()));
           if (data.rates && (data.rates.usd || data.rates.eur)) {
             setRates((r) => ({ ...r, usd: data.rates.usd, eur: data.rates.eur, updatedAt: data.rates.updatedAt }));
           }
         } else {
           setTransactions(defaultTransactions());
           setAccounts(defaultAccounts());
+          setRoundUp(defaultRoundUp());
         }
         setLoaded(true);
       },
@@ -299,6 +357,7 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
         skipNextSaveRef.current = true;
         setTransactions(defaultTransactions());
         setAccounts(defaultAccounts());
+        setRoundUp(defaultRoundUp());
         setLoaded(true);
       }
     );
@@ -361,12 +420,12 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
       return;
     }
     latestPayloadRef.current = {
-      transactions, accounts, goal,
+      transactions, accounts, goal, roundUp,
       rates: { usd: rates.usd, eur: rates.eur, updatedAt: rates.updatedAt },
     };
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     saveTimeoutRef.current = setTimeout(flushSave, 400);
-  }, [transactions, accounts, goal, rates.usd, rates.eur, rates.updatedAt, loaded, flushSave]);
+  }, [transactions, accounts, goal, roundUp, rates.usd, rates.eur, rates.updatedAt, loaded, flushSave]);
 
   // make sure a pending save isn't lost if the tab/file closes right after an edit
   useEffect(() => {
@@ -390,9 +449,36 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
     }
   }, [loaded, transactions, selectedMonth]);
 
+  // Добавление операции. Для расходов со счёта, выбранного в настройках
+  // округления, дополнительно создаёт перевод-округление на накопительный
+  // счёт — как в банковском примере: чем больше сумма покупки, тем больше шаг.
   const addTransaction = useCallback((tx) => {
-    setTransactions((prev) => [...prev, { ...tx, id: uid() }]);
-  }, []);
+    setTransactions((prev) => {
+      const next = [...prev, { ...tx, id: uid() }];
+      if (
+        tx.type === "expense" &&
+        roundUp.enabled &&
+        roundUp.mode !== "off" &&
+        tx.account === roundUp.sourceAccount &&
+        roundUp.targetAccount &&
+        roundUp.targetAccount !== tx.account
+      ) {
+        const diff = computeRoundUp(Number(tx.amount) || 0, roundUp.mode);
+        if (diff > 0) {
+          next.push({
+            id: uid(),
+            type: "transfer",
+            date: tx.date,
+            fromAccount: roundUp.sourceAccount,
+            toAccount: roundUp.targetAccount,
+            amount: diff,
+            roundUp: true,
+          });
+        }
+      }
+      return next;
+    });
+  }, [roundUp]);
   const deleteTransaction = useCallback((id) => {
     // Удаление — необратимое действие, поэтому сохраняем сразу, а не через
     // обычный 400мс дебаунс: если вкладку закроют/обновят почти сразу после
@@ -404,19 +490,19 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
         saveTimeoutRef.current = null;
       }
       latestPayloadRef.current = {
-        transactions: next, accounts, goal,
+        transactions: next, accounts, goal, roundUp,
         rates: { usd: rates.usd, eur: rates.eur, updatedAt: rates.updatedAt },
       };
       flushSave();
       skipNextSaveRef.current = true; // уже сохранили выше — обычный эффект пусть не дублирует запись
       return next;
     });
-  }, [accounts, goal, rates.usd, rates.eur, rates.updatedAt, flushSave]);
+  }, [accounts, goal, roundUp, rates.usd, rates.eur, rates.updatedAt, flushSave]);
 
   // ---- export / import JSON (бэкап и перенос данных между браузерами/устройствами) ----
   const exportData = useCallback(() => {
     const payload = JSON.stringify(
-      { transactions, accounts, goal, rates: { usd: rates.usd, eur: rates.eur, updatedAt: rates.updatedAt } },
+      { transactions, accounts, goal, roundUp, rates: { usd: rates.usd, eur: rates.eur, updatedAt: rates.updatedAt } },
       null,
       2
     );
@@ -427,7 +513,7 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
     a.download = `capital-tracker-${todayStr()}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [transactions, accounts, goal, rates.usd, rates.eur, rates.updatedAt]);
+  }, [transactions, accounts, goal, roundUp, rates.usd, rates.eur, rates.updatedAt]);
 
   const importData = useCallback((file) => {
     const reader = new FileReader();
@@ -437,6 +523,7 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
         setTransactions(Array.isArray(data.transactions) ? data.transactions : []);
         setAccounts(normalizeAccounts(data.accounts));
         setGoal(typeof data.goal === "number" ? data.goal : 10000000);
+        setRoundUp((r) => (data.roundUp && typeof data.roundUp === "object" ? { ...r, ...data.roundUp } : defaultRoundUp()));
         if (data.rates && (data.rates.usd || data.rates.eur)) {
           setRates((r) => ({ ...r, usd: data.rates.usd, eur: data.rates.eur, updatedAt: data.rates.updatedAt }));
         }
@@ -478,14 +565,29 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
     }, 0);
   }, [accounts, transactions, rates.usd, rates.eur]);
 
-  // % change in capital over the selected period (month / half year / year), for the badge next to the total
+  // % change in capital over the selected period (month / half year / year / all time), for the badge next to the total.
+  // Для "всё время" сравниваем не с фиксированным числом месяцев назад, а с
+  // моментом перед самой первой операцией — то есть с начальными остатками.
   const capitalDelta = useMemo(() => {
     const mKey = selectedMonth || availableMonths[availableMonths.length - 1];
-    const periodN = period === "month" ? 1 : period === "half" ? 6 : 12;
-    const prevPeriodEndKey = addMonths(mKey, -periodN);
+    let prevPeriodEndKey;
+    if (period === "all") {
+      const earliestKey = transactions.length ? transactions.map((t) => monthKey(t.date)).sort()[0] : mKey;
+      prevPeriodEndKey = addMonths(earliestKey, -1);
+    } else {
+      const periodN = period === "month" ? 1 : period === "half" ? 6 : 12;
+      prevPeriodEndKey = addMonths(mKey, -periodN);
+    }
     const capitalBefore = capitalAtEnd(prevPeriodEndKey);
     return capitalBefore ? (capitalAtEnd(mKey) - capitalBefore) / Math.abs(capitalBefore) : null;
-  }, [selectedMonth, availableMonths, period, capitalAtEnd]);
+  }, [selectedMonth, availableMonths, period, transactions, capitalAtEnd]);
+
+  // сколько уже накоплено округлениями покупок (только автосозданные переводы)
+  const roundUpCollected = useMemo(() => {
+    return transactions
+      .filter((t) => t.type === "transfer" && t.roundUp && t.toAccount === roundUp.targetAccount)
+      .reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  }, [transactions, roundUp.targetAccount]);
 
   // count + total for the active income/expense/transfer tab, shown in the top nav
   const activeTypeStats = useMemo(() => {
@@ -563,6 +665,9 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
               addTransaction={addTransaction}
               deleteTransaction={deleteTransaction}
               rates={rates}
+              roundUp={roundUp}
+              setRoundUp={setRoundUp}
+              roundUpCollected={roundUpCollected}
             />
           )}
           {tab === "transfer" && (
@@ -686,36 +791,51 @@ function TopNav({ tab, setTab, period, setPeriod, selectedMonth, setSelectedMont
       )}
 
       {tab === "summary" && (
-        <div className="flex items-center gap-2 flex-wrap justify-center">
-          <div className="flex gap-1 p-1 rounded-lg" style={{ background: "var(--color-segment-bg)" }}>
-            {[["month", "Месяц"], ["half", "Полгода"], ["year", "Год"]].map(([id, lbl]) => (
-              <button
-                key={id}
-                onClick={() => setPeriod(id)}
-                className="px-3 py-1.5 rounded-md text-sm font-medium transition-colors focus:outline-none"
-                style={{
-                  background: period === id ? "var(--color-segment-active)" : "transparent",
-                  color: period === id ? COLORS.text : COLORS.sub,
-                  boxShadow: period === id ? "var(--shadow-active)" : "none",
-                }}
-              >
-                {lbl}
-              </button>
-            ))}
-          </div>
-          <div className="relative">
-            <select
-              value={selectedMonth}
-              onChange={(e) => setSelectedMonth(e.target.value)}
-              className="appearance-none pl-3 pr-9 py-2 rounded-lg text-sm font-medium cursor-pointer"
-              style={{ background: COLORS.card, border: `1px solid ${COLORS.border}` }}
+        <div className="flex items-center gap-1 p-1 rounded-lg flex-wrap justify-center" style={{ background: "var(--color-segment-bg)" }}>
+          <div
+            className="flex items-center rounded-md overflow-hidden"
+            style={{
+              background: period === "month" ? "var(--color-segment-active)" : "transparent",
+              color: period === "month" ? COLORS.text : COLORS.sub,
+              boxShadow: period === "month" ? "var(--shadow-active)" : "none",
+            }}
+          >
+            <button
+              onClick={() => setPeriod("month")}
+              className="pl-3 pr-1 py-1.5 text-sm font-medium focus:outline-none"
+              style={{ color: "inherit" }}
             >
-              {availableMonths.map((k) => (
-                <option key={k} value={k}>{monthLabel(k)}</option>
-              ))}
-            </select>
-            <ChevronDown size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2" style={{ color: COLORS.sub }} />
+              {monthLabel(selectedMonth)}
+            </button>
+            <div className="relative">
+              <select
+                value={selectedMonth}
+                onChange={(e) => { setSelectedMonth(e.target.value); setPeriod("month"); }}
+                title="Выбрать месяц"
+                className="appearance-none bg-transparent w-6 py-1.5 pr-2 cursor-pointer focus:outline-none"
+                style={{ color: "transparent" }}
+              >
+                {availableMonths.map((k) => (
+                  <option key={k} value={k} style={{ color: COLORS.text }}>{monthLabel(k)}</option>
+                ))}
+              </select>
+              <ChevronDown size={12} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2" style={{ color: "inherit" }} />
+            </div>
           </div>
+          {[["half", "Полгода"], ["year", "Год"], ["all", "Всё время"]].map(([id, lbl]) => (
+            <button
+              key={id}
+              onClick={() => setPeriod(id)}
+              className="px-3 py-1.5 rounded-md text-sm font-medium transition-colors focus:outline-none"
+              style={{
+                background: period === id ? "var(--color-segment-active)" : "transparent",
+                color: period === id ? COLORS.text : COLORS.sub,
+                boxShadow: period === id ? "var(--shadow-active)" : "none",
+              }}
+            >
+              {lbl}
+            </button>
+          ))}
         </div>
       )}
 
@@ -733,9 +853,11 @@ function TopNav({ tab, setTab, period, setPeriod, selectedMonth, setSelectedMont
 // Summary page
 // ---------------------------------------------------------------------------
 function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod, selectedMonth, setSelectedMonth, rates }) {
+  const isAllTime = period === "all";
   const periodN = period === "month" ? 1 : period === "half" ? 6 : 12;
-  const periodLabel = period === "month" ? "за месяц" : period === "half" ? "за полгода" : "за год";
+  const periodLabel = period === "month" ? "за месяц" : period === "half" ? "за полгода" : period === "year" ? "за год" : "за всё время";
   const [catTab, setCatTab] = useState("expense");
+  const [assetView, setAssetView] = useState("pie"); // 'pie' | 'bars'
 
   const income = transactions.filter((t) => t.type === "income");
   const expense = transactions.filter((t) => t.type === "expense");
@@ -755,6 +877,15 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
   }, 0);
 
   const periodKeysArr = (endKey, n) => Array.from({ length: n }, (_, i) => addMonths(endKey, -(n - 1 - i)));
+  // список ключей месяцев от startKey до endKey включительно — используется
+  // для вкладки "Всё время", где число месяцев заранее неизвестно
+  const monthRange = (startKey, endKey) => {
+    const list = [];
+    let k = startKey;
+    let guard = 0;
+    while (k <= endKey && guard < 1200) { list.push(k); k = addMonths(k, 1); guard++; }
+    return list;
+  };
 
   const capitalAtEnd = useCallback((mKeyArg) => {
     // capital = sum(opening) + income up to end of month - expense up to end of month, всё в рублях
@@ -776,9 +907,13 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
 
   const mKey = selectedMonth || availableMonths[availableMonths.length - 1];
 
-  const curKeys = periodKeysArr(mKey, periodN);
+  // "Всё время" — от самой первой операции (или от выбранного месяца, если
+  // операций ещё нет) до выбранного месяца; сравнивать не с чем, поэтому
+  // предыдущий период для неё пуст (дельты ниже скрываются через isAllTime).
+  const earliestMonthKey = transactions.length ? transactions.map((t) => monthKey(t.date)).sort()[0] : mKey;
+  const curKeys = isAllTime ? monthRange(earliestMonthKey, mKey) : periodKeysArr(mKey, periodN);
   const prevPeriodEndKey = addMonths(mKey, -periodN);
-  const prevKeys = periodKeysArr(prevPeriodEndKey, periodN);
+  const prevKeys = isAllTime ? [] : periodKeysArr(prevPeriodEndKey, periodN);
 
   const periodIncome = sumBy(statIncome, (t) => curKeys.includes(monthKey(t.date)));
   const periodExpense = sumBy(statExpense, (t) => curKeys.includes(monthKey(t.date)));
@@ -845,6 +980,9 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
     const sum = balances.filter((a) => a.type === type).reduce((s, a) => s + a.balance, 0);
     return { type, sum, pct: currentCapital ? sum / currentCapital : 0 };
   });
+  // тот же список, но отфильтрован (без долгов и нулевых) и отсортирован по
+  // убыванию — используется и для круговой диаграммы, и для процентных баров
+  const assetDistribution = distribution.filter((d) => d.type !== "Долг/кредит" && d.sum > 0).sort((a, b) => b.sum - a.sum);
 
   // history for line chart: from earliest tx month (or 6 months back) to selected month, capped at 13 points
   const history = useMemo(() => {
@@ -869,7 +1007,9 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
     expense: sumBy(statExpense, (t) => monthKey(t.date) === k),
   })).map((m) => ({ ...m, net: m.income - m.expense }));
   const bestMonth = monthStats.length ? monthStats.reduce((a, b) => (b.net > a.net ? b : a)) : null;
-  const worstMonth = monthStats.length ? monthStats.reduce((a, b) => (b.net < a.net ? b : a)) : null;
+  // "худший месяц" показываем только когда есть минимум 2 месяца данных —
+  // иначе один и тот же месяц дублировался бы и в "лучшем", и в "худшем"
+  const worstMonth = monthStats.length > 1 ? monthStats.reduce((a, b) => (b.net < a.net ? b : a)) : null;
   const avgIncome = monthStats.length ? monthStats.reduce((s, m) => s + m.income, 0) / monthStats.length : 0;
   const avgExpense = monthStats.length ? monthStats.reduce((s, m) => s + m.expense, 0) / monthStats.length : 0;
 
@@ -884,10 +1024,10 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
   };
 
   const kpis = [
-    { label: `Доходы (${periodLabel})`, value: periodIncome, delta: periodIncome - prevPeriodIncome, deltaPct: pctChange(periodIncome, prevPeriodIncome), icon: TrendingUp, fg: COLORS.green, bg: COLORS.greenBg, favorable: true },
-    { label: `Расходы (${periodLabel})`, value: periodExpense, delta: periodExpense - prevPeriodExpense, deltaPct: pctChange(periodExpense, prevPeriodExpense), icon: TrendingDown, fg: COLORS.red, bg: COLORS.redBg, favorable: false },
-    { label: `Сбережения (${periodLabel})`, value: netIncome, delta: netIncome - prevNetIncome, deltaPct: pctChange(netIncome, prevNetIncome), icon: PiggyBank, fg: COLORS.violet, bg: COLORS.violetBg, favorable: true },
-    { label: "Норма сбережений", value: savingsRate, isPct: true, delta: savingsRate - prevSavingsRate, deltaPct: null, icon: Target, fg: COLORS.amber, bg: COLORS.amberBg, favorable: true },
+    { label: `Доходы (${periodLabel})`, value: periodIncome, delta: isAllTime ? null : periodIncome - prevPeriodIncome, deltaPct: isAllTime ? null : pctChange(periodIncome, prevPeriodIncome), icon: TrendingUp, fg: COLORS.green, bg: COLORS.greenBg, favorable: true },
+    { label: `Расходы (${periodLabel})`, value: periodExpense, delta: isAllTime ? null : periodExpense - prevPeriodExpense, deltaPct: isAllTime ? null : pctChange(periodExpense, prevPeriodExpense), icon: TrendingDown, fg: COLORS.red, bg: COLORS.redBg, favorable: false },
+    { label: `Сбережения (${periodLabel})`, value: netIncome, delta: isAllTime ? null : netIncome - prevNetIncome, deltaPct: isAllTime ? null : pctChange(netIncome, prevNetIncome), icon: PiggyBank, fg: COLORS.violet, bg: COLORS.violetBg, favorable: true },
+    { label: "Норма сбережений", value: savingsRate, isPct: true, delta: isAllTime ? null : savingsRate - prevSavingsRate, deltaPct: null, icon: Target, fg: COLORS.amber, bg: COLORS.amberBg, favorable: true },
   ];
 
   return (
@@ -1003,48 +1143,62 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
         </Card>
 
         <Card style={{ padding: 20 }}>
-          <div className="text-sm font-semibold mb-2">Активы по типам</div>
-          <div style={{ height: 220 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={distribution.filter((d) => d.type !== "Долг/кредит" && d.sum > 0)}
-                  dataKey="sum" nameKey="type" innerRadius={65} outerRadius={95} paddingAngle={2}
-                  isAnimationActive={false}
-                >
-                  {distribution.filter((d) => d.type !== "Долг/кредит" && d.sum > 0).map((d) => (
-                    <Cell key={d.type} fill={TYPE_COLOR[d.type]} />
-                  ))}
-                </Pie>
-                <Tooltip formatter={(v) => fmtRub(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${COLORS.border}`, fontSize: 12 }} />
-              </PieChart>
-            </ResponsiveContainer>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="text-sm font-semibold">Активы по типам</div>
+            <button
+              onClick={() => setAssetView((v) => (v === "pie" ? "bars" : "pie"))}
+              title={assetView === "pie" ? "Показать в процентах" : "Показать круговой диаграммой"}
+              aria-label="Переключить вид диаграммы"
+              className="flex items-center justify-center w-8 h-8 rounded-lg transition-colors focus:outline-none"
+              style={{ color: COLORS.sub }}
+            >
+              {assetView === "pie" ? <BarChart2 size={16} /> : <PieChartIcon size={16} />}
+            </button>
           </div>
+          {assetView === "pie" ? (
+            <div style={{ height: 220 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={assetDistribution}
+                    dataKey="sum" nameKey="type" innerRadius={65} outerRadius={95} paddingAngle={2}
+                    isAnimationActive={false}
+                  >
+                    {assetDistribution.map((d) => (
+                      <Cell key={d.type} fill={TYPE_COLOR[d.type]} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(v) => fmtRub(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${COLORS.border}`, fontSize: 12 }} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div className="space-y-2.5 overflow-y-auto pr-1" style={{ height: 220 }}>
+              {assetDistribution.length === 0 ? (
+                <div className="flex items-center justify-center text-sm text-center px-2 h-full" style={{ color: COLORS.sub }}>
+                  Нет активов для отображения
+                </div>
+              ) : assetDistribution.map((d) => (
+                <div key={d.type}>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <span className="truncate text-xs font-medium">{d.type}</span>
+                    <span className="text-xs font-semibold tabular-nums shrink-0">
+                      {fmtRub(d.sum)} <span className="font-normal" style={{ color: COLORS.sub }}>· {fmtPctPlain(d.pct)}</span>
+                    </span>
+                  </div>
+                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--color-segment-bg)" }}>
+                    <div className="h-full rounded-full" style={{ width: `${Math.max(2, d.pct * 100)}%`, background: TYPE_COLOR[d.type] }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
       </div>
 
       {/* мои счета */}
       <Card style={{ padding: 20 }}>
         <div className="text-sm font-semibold mb-3">Мои счета</div>
-        {accounts.some((a) => a.type === "Валюта") && (
-          <div className="flex items-center flex-wrap gap-x-5 gap-y-1.5 text-sm px-3 py-2.5 rounded-lg mb-3" style={{ background: COLORS.bg }}>
-            <span className="flex items-center gap-1.5">
-              <span className="text-xs" style={{ color: COLORS.sub }}>USD</span>
-              <span className="font-semibold tabular-nums">{rates.usd ? fmtRateRub(rates.usd) : "—"}</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="text-xs" style={{ color: COLORS.sub }}>EUR</span>
-              <span className="font-semibold tabular-nums">{rates.eur ? fmtRateRub(rates.eur) : "—"}</span>
-            </span>
-            <span className="text-xs" style={{ color: COLORS.sub }}>
-              {rates.error
-                ? rates.error
-                : rates.updatedAt
-                ? `Курс ЦБ РФ на ${new Date(rates.updatedAt).toLocaleDateString("ru-RU")}`
-                : "Загрузка курса…"}
-            </span>
-          </div>
-        )}
         <div>
           {balances.map((a) => {
             const isCur = a.currencyCode !== "RUB";
@@ -1124,7 +1278,7 @@ function StatBlock({ label, value, sub, color, icon: Icon }) {
 // ---------------------------------------------------------------------------
 // Income / Expense page (shared component)
 // ---------------------------------------------------------------------------
-function TransactionsPage({ type, title, categories, accounts, transactions, addTransaction, deleteTransaction, rates }) {
+function TransactionsPage({ type, title, categories, accounts, transactions, addTransaction, deleteTransaction, rates, roundUp, setRoundUp, roundUpCollected }) {
   const isIncome = type === "income";
   const [date, setDate] = useState(todayStr());
   const [category, setCategory] = useState("");
@@ -1155,7 +1309,7 @@ function TransactionsPage({ type, title, categories, accounts, transactions, add
       <Card style={{ padding: 16 }}>
         <div className="grid grid-cols-1 gap-2 items-end sm:grid-cols-2">
           <Field label="Категория">
-            <input list={listId} value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Выберите или впишите"
+            <input list={listId} value={category} onChange={(e) => setCategory(sanitizeCategoryInput(e.target.value))} placeholder="Выберите или впишите"
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }} />
             <datalist id={listId}>{categories.map((c) => <option key={c} value={c} />)}</datalist>
           </Field>
@@ -1166,7 +1320,7 @@ function TransactionsPage({ type, title, categories, accounts, transactions, add
             </select>
           </Field>
           <Field label={isCurAccount ? `Сумма, ${CURRENCY_SYMBOL[selectedCode]}` : "Сумма, ₽"}>
-            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0"
+            <input type="text" inputMode="decimal" value={amount} onChange={(e) => setAmount(sanitizeAmountInput(e.target.value))} placeholder="0"
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }} />
             {isCurAccount && amount && (
               <div className="text-xs mt-1" style={{ color: COLORS.sub }}>≈ {fmtRub(toRub(amount, selectedCode, rates))}</div>
@@ -1185,6 +1339,10 @@ function TransactionsPage({ type, title, categories, accounts, transactions, add
           <Plus size={15} /> Добавить
         </button>
       </Card>
+
+      {!isIncome && (
+        <RoundUpSettings roundUp={roundUp} setRoundUp={setRoundUp} accounts={accounts} collected={roundUpCollected} />
+      )}
 
       <Card style={{ padding: 0 }}>
         <div className="hidden sm:grid gap-2 px-4 py-2.5 text-xs font-semibold" style={{ gridTemplateColumns: "90px 1fr 1.4fr 110px 110px 36px", color: COLORS.sub, borderBottom: `1px solid ${COLORS.border}` }}>
@@ -1253,6 +1411,64 @@ function Field({ label, children, className = "" }) {
 }
 
 // ---------------------------------------------------------------------------
+// Round-up savings settings — показывается над формой добавления расхода.
+// По образцу банковской фичи: включаем режим шага, выбираем счёт списания
+// (обычно "Карта") и накопительный счёт — и после каждого расхода с этого
+// счёта автоматически создаётся перевод-округление.
+// ---------------------------------------------------------------------------
+function RoundUpSettings({ roundUp, setRoundUp, accounts, collected }) {
+  const sourceOptions = accounts.filter((a) => a.type !== "Валюта");
+  const targetOptions = accounts.filter((a) => a.name !== roundUp.sourceAccount);
+  const modeValue = roundUp.enabled ? roundUp.mode : "off";
+
+  const onModeChange = (v) => {
+    setRoundUp((r) => (v === "off" ? { ...r, enabled: false } : { ...r, enabled: true, mode: v }));
+  };
+
+  return (
+    <Card style={{ padding: 16 }}>
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+        <div className="text-sm font-semibold">Округление покупок</div>
+        {roundUp.enabled && (
+          <div className="text-xs" style={{ color: COLORS.sub }}>
+            Накоплено округлением: <span className="font-semibold" style={{ color: COLORS.violet }}>{fmtRub(collected || 0)}</span>
+          </div>
+        )}
+      </div>
+      <div className="grid grid-cols-1 gap-2 items-end sm:grid-cols-[1fr_1fr_auto]">
+        <Field label="Списывать округление со счёта">
+          <select value={roundUp.sourceAccount} onChange={(e) => setRoundUp((r) => ({ ...r, sourceAccount: e.target.value }))}
+            disabled={!roundUp.enabled}
+            className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}`, opacity: roundUp.enabled ? 1 : 0.5 }}>
+            {sourceOptions.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Копить на счёт">
+          <select value={roundUp.targetAccount} onChange={(e) => setRoundUp((r) => ({ ...r, targetAccount: e.target.value }))}
+            disabled={!roundUp.enabled}
+            className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}`, opacity: roundUp.enabled ? 1 : 0.5 }}>
+            {targetOptions.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Шаг">
+          <select value={modeValue} onChange={(e) => onModeChange(e.target.value)}
+            className="px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}`, width: 118 }}>
+            {ROUND_UP_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+          </select>
+        </Field>
+      </div>
+      {roundUp.enabled && (
+        <div className="mt-2 text-xs" style={{ color: COLORS.sub }}>
+          {roundUp.mode === "smart"
+            ? "Умный шаг растёт вместе с суммой покупки: до 50 ₽ — шаг 10 ₽, 50–300 ₽ — 50 ₽, 300–2 000 ₽ — 100 ₽, 2 000–10 000 ₽ — 500 ₽, от 10 000 ₽ — 1 000 ₽."
+            : `После каждой покупки с "${roundUp.sourceAccount}" сумма будет округлена вверх до ближайших ${roundUp.mode} ₽, а разница уйдёт на "${roundUp.targetAccount}".`}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Transfer page — переброска денег между счетами (пополнение капитала:
 // накопительный счёт, депозит, акции, ОФЗ и т.п.). Не влияет на доходы/расходы.
 // ---------------------------------------------------------------------------
@@ -1304,7 +1520,7 @@ function TransferPage({ accounts, transactions, addTransaction, deleteTransactio
             </select>
           </Field>
           <Field label={isCurFrom ? `Сумма, ${CURRENCY_SYMBOL[fromCode]}` : "Сумма, ₽"}>
-            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0"
+            <input type="text" inputMode="decimal" value={amount} onChange={(e) => setAmount(sanitizeAmountInput(e.target.value))} placeholder="0"
               className="w-full px-2 py-1.5 rounded-md text-sm" style={{ border: `1px solid ${COLORS.border}` }} />
             {convertedPreview && (
               <div className="text-xs mt-1" style={{ color: COLORS.sub }}>≈ {convertedPreview} на счёте получателя</div>
