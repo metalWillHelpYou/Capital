@@ -4,7 +4,7 @@ import {
   PieChart, Pie, Cell,
 } from "recharts";
 import {
-  Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Trash2, Plus,
+  Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Trash2, Plus, Minus,
   LayoutGrid, ArrowDownCircle, ArrowUpCircle, ChevronDown,
   Download, Upload, LogOut, Sun, Moon, BarChart2, PieChart as PieChartIcon,
 } from "lucide-react";
@@ -171,7 +171,11 @@ const YAxisTickLeft = ({ y, payload }) => (
 // счёт в общий капитал в рублях, где угодно, где он суммируется.
 // ---------------------------------------------------------------------------
 const CURRENCY_CODES = ["USD", "EUR"];
-const CURRENCY_SYMBOL = { USD: "$", EUR: "€" };
+const CURRENCY_SYMBOL = { USD: "$", EUR: "€", RUB: "₽" };
+// валюты, доступные для отдельной позиции в портфеле (в отличие от счетов
+// типа "Валюта", позиция по умолчанию рублёвая — большинство бумаг на MOEX
+// котируются в рублях, доллары/евро нужны только для валютных бумаг)
+const HOLDING_CURRENCY_CODES = ["RUB", "USD", "EUR"];
 const accountCurrency = (acc) => (acc && acc.type === "Валюта" ? (acc.currency || "USD") : "RUB");
 const rateForCurrency = (code, rates) => (code === "USD" ? rates.usd : code === "EUR" ? rates.eur : 1);
 // amount — число в единицах `code` (или в рублях, если code === "RUB")
@@ -185,6 +189,64 @@ const fmtCur = (n, code) => {
   const sign = n < 0 ? "-" : "";
   return sign + Math.abs(n).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + (CURRENCY_SYMBOL[code] || code);
 };
+
+// ---------------------------------------------------------------------------
+// Ценные бумаги (счета типа "Акции"/"Облигации") — вместо одного ручного
+// остатка счёт хранит список позиций (holdings): тикер, количество и цена
+// покупки. Текущая цена подтягивается с MOEX ISS (тот же принцип, что и курс
+// валют): сначала узнаём, на какой площадке торгуется тикер, потом берём
+// последнюю цену сделки. Для облигаций MOEX котирует цену в % от номинала —
+// переводим в рубли, используя номинал (FACEVALUE) из того же ответа.
+// Если тикер не найден или MOEX недоступен (например, из-за CORS на some
+// хостингах) — можно вписать цену вручную, она просто перекрывает автоматику.
+// ---------------------------------------------------------------------------
+const MOEX_BASE = "https://iss.moex.com/iss";
+
+async function fetchSecurityPrice(rawTicker) {
+  const ticker = (rawTicker || "").trim().toUpperCase();
+  if (!ticker) throw new Error("Пустой тикер");
+
+  const boardsRes = await fetch(`${MOEX_BASE}/securities/${encodeURIComponent(ticker)}.json?iss.meta=off&iss.only=boards&boards.columns=secid,boardid,market,engine,is_primary,is_traded`);
+  if (!boardsRes.ok) throw new Error("MOEX недоступен");
+  const boardsJson = await boardsRes.json();
+  const bCols = boardsJson.boards?.columns || [];
+  const bRows = boardsJson.boards?.data || [];
+  const bi = (name) => bCols.indexOf(name);
+  const board = bRows.find((r) => r[bi("is_primary")] === 1) || bRows.find((r) => r[bi("is_traded")] === 1) || bRows[0];
+  if (!board) throw new Error("Тикер не найден на MOEX");
+  const engine = board[bi("engine")], market = board[bi("market")], boardid = board[bi("boardid")];
+
+  const dataRes = await fetch(`${MOEX_BASE}/engines/${engine}/markets/${market}/boards/${boardid}/securities/${encodeURIComponent(ticker)}.json?iss.meta=off&iss.only=marketdata,securities&marketdata.columns=SECID,LAST,MARKETPRICETODAY&securities.columns=SECID,PREVPRICE,FACEVALUE`);
+  if (!dataRes.ok) throw new Error("MOEX недоступен");
+  const dataJson = await dataRes.json();
+  const mCols = dataJson.marketdata?.columns || [];
+  const mRow = (dataJson.marketdata?.data || [])[0] || [];
+  const sCols = dataJson.securities?.columns || [];
+  const sRow = (dataJson.securities?.data || [])[0] || [];
+  const mi = (name) => mCols.indexOf(name);
+  const si = (name) => sCols.indexOf(name);
+  const faceValue = sRow[si("FACEVALUE")];
+  const raw = [mRow[mi("LAST")], mRow[mi("MARKETPRICETODAY")], sRow[si("PREVPRICE")]].find((v) => typeof v === "number" && v > 0);
+  if (raw == null) throw new Error("Нет цены по тикеру");
+  const price = market === "bonds" && faceValue ? (raw / 100) * faceValue : raw;
+  return { price, market, faceValue: faceValue || null };
+}
+
+// эффективная цена позиции: ручная цена (если задана) → цена с MOEX → цена покупки → 0
+const holdingPrice = (h, securityPrices) => {
+  if (h.manualPrice !== undefined && h.manualPrice !== null && h.manualPrice !== "") return Number(h.manualPrice) || 0;
+  const fetched = securityPrices[(h.ticker || "").trim().toUpperCase()];
+  if (fetched && typeof fetched.price === "number") return fetched.price;
+  return Number(h.avgPrice) || 0;
+};
+// валюта, в которой указана цена позиции (по умолчанию рубли — как раньше,
+// для дальних/старых позиций без явной валюты); долларовые/евровые бумаги
+// переводятся в рубли по курсу ЦБ, так же как счета типа "Валюта"
+const holdingCurrency = (h) => (h && h.currency) || "RUB";
+const holdingValue = (h, securityPrices) => (Number(h.quantity) || 0) * holdingPrice(h, securityPrices); // в нативной валюте позиции
+const holdingValueRub = (h, securityPrices, rates) => toRub(holdingValue(h, securityPrices), holdingCurrency(h), rates);
+const isSecurityType = (type) => type === "Акции" || type === "Облигации";
+const accountHoldingsValue = (a, securityPrices, rates) => (a.holdings || []).reduce((s, h) => s + holdingValueRub(h, securityPrices, rates), 0);
 
 // ---------------------------------------------------------------------------
 // Round-up savings ("округление покупок") — по образцу банковской фичи: после
@@ -253,7 +315,7 @@ const ACCOUNT_TEMPLATE = [
   { name: "EUR", type: "Валюта", currency: "EUR" },
 ];
 
-const defaultAccounts = () => ACCOUNT_TEMPLATE.map((a) => ({ id: uid(), opening: 0, ...a }));
+const defaultAccounts = () => ACCOUNT_TEMPLATE.map((a) => ({ id: uid(), opening: 0, holdings: [], ...a }));
 
 // Приводит то, что лежит в Firestore (в т.ч. старые демо-счета или мусор от
 // прежней кнопки добавления), к фиксированному набору из 8 счетов, сохраняя
@@ -266,6 +328,7 @@ const normalizeAccounts = (saved) => {
       id: existing?.id || uid(),
       ...tpl,
       opening: typeof existing?.opening === "number" ? existing.opening : 0,
+      holdings: Array.isArray(existing?.holdings) ? existing.holdings : [],
     };
   });
 };
@@ -309,6 +372,9 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
   const [loaded, setLoaded] = useState(false);
   const [transactions, setTransactions] = useState([]);
   const [accounts, setAccounts] = useState([]);
+  // котировки бумаг с MOEX ISS: { TICKER: { price, market, faceValue, updatedAt, error } }
+  const [securityPrices, setSecurityPrices] = useState({});
+  const [pricesLoading, setPricesLoading] = useState(false);
   const [goal, setGoal] = useState(10000000);
   const [roundUp, setRoundUp] = useState(defaultRoundUp());
   const [selectedMonth, setSelectedMonth] = useState(null);
@@ -499,7 +565,82 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
     });
   }, [accounts, goal, roundUp, rates.usd, rates.eur, rates.updatedAt, flushSave]);
 
-  // ---- export / import JSON (бэкап и перенос данных между браузерами/устройствами) ----
+  // ---- ценные бумаги: позиции + автообновление цен с MOEX ----
+  const addHolding = useCallback((accountName, holding) => {
+    setAccounts((prev) => prev.map((a) => (a.name === accountName ? { ...a, holdings: [...(a.holdings || []), { id: uid(), ...holding }] } : a)));
+  }, []);
+  const removeHolding = useCallback((accountName, holdingId) => {
+    setAccounts((prev) => prev.map((a) => (a.name === accountName ? { ...a, holdings: (a.holdings || []).filter((h) => h.id !== holdingId) } : a)));
+  }, []);
+  const setHoldingManualPrice = useCallback((accountName, holdingId, manualPrice) => {
+    setAccounts((prev) => prev.map((a) => (a.name === accountName
+      ? { ...a, holdings: (a.holdings || []).map((h) => (h.id === holdingId ? { ...h, manualPrice } : h)) }
+      : a)));
+  }, []);
+  const setHoldingCurrency = useCallback((accountName, holdingId, currency) => {
+    setAccounts((prev) => prev.map((a) => (a.name === accountName
+      ? { ...a, holdings: (a.holdings || []).map((h) => (h.id === holdingId ? { ...h, currency } : h)) }
+      : a)));
+  }, []);
+  // deltaQty > 0 — докупка (можно передать цену докупки, чтобы пересчитать среднюю
+  // цену позиции взвешенно); deltaQty < 0 — продажа части позиции, средняя цена
+  // остаётся прежней. Если количество уходит в 0 или меньше — позиция удаляется.
+  const adjustHoldingQuantity = useCallback((accountName, holdingId, deltaQty, dealPrice) => {
+    setAccounts((prev) => prev.map((a) => {
+      if (a.name !== accountName) return a;
+      const holdings = (a.holdings || [])
+        .map((h) => {
+          if (h.id !== holdingId) return h;
+          const oldQty = Number(h.quantity) || 0;
+          const newQty = oldQty + deltaQty;
+          if (newQty <= 0) return { ...h, quantity: 0 };
+          let avgPrice = h.avgPrice;
+          if (deltaQty > 0 && dealPrice !== null && dealPrice !== undefined && !Number.isNaN(dealPrice)) {
+            const oldCost = oldQty * (Number(h.avgPrice) || 0);
+            avgPrice = (oldCost + deltaQty * dealPrice) / newQty;
+          }
+          return { ...h, quantity: newQty, avgPrice };
+        })
+        .filter((h) => (Number(h.quantity) || 0) > 0);
+      return { ...a, holdings };
+    }));
+  }, []);
+
+  const securityTickers = useMemo(() => {
+    const set = new Set();
+    accounts.forEach((a) => {
+      if (isSecurityType(a.type)) (a.holdings || []).forEach((h) => { if (h.ticker) set.add(h.ticker.trim().toUpperCase()); });
+    });
+    return Array.from(set);
+  }, [accounts]);
+
+  const refreshSecurityPrices = useCallback(async (tickersArg) => {
+    const list = tickersArg && tickersArg.length ? tickersArg : securityTickers;
+    if (!list.length) return;
+    setPricesLoading(true);
+    const results = await Promise.all(list.map(async (t) => {
+      try {
+        const r = await fetchSecurityPrice(t);
+        return [t, { ...r, updatedAt: Date.now(), error: null }];
+      } catch (e) {
+        return [t, { price: null, updatedAt: Date.now(), error: e.message || "Ошибка загрузки" }];
+      }
+    }));
+    setSecurityPrices((prev) => {
+      const next = { ...prev };
+      results.forEach(([t, v]) => { next[t] = v; });
+      return next;
+    });
+    setPricesLoading(false);
+  }, [securityTickers]);
+
+  // подтягиваем котировки при старте и при появлении новых тикеров в портфеле
+  const tickersSig = securityTickers.join(",");
+  useEffect(() => {
+    if (securityTickers.length) refreshSecurityPrices(securityTickers);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tickersSig]);
+
   const exportData = useCallback(() => {
     const payload = JSON.stringify(
       { transactions, accounts, goal, roundUp, rates: { usd: rates.usd, eur: rates.eur, updatedAt: rates.updatedAt } },
@@ -542,6 +683,7 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
 
   const currentCapital = useMemo(() => {
     return accounts.reduce((s, a) => {
+      if (isSecurityType(a.type)) return s + accountHoldingsValue(a, securityPrices, rates);
       const code = accountCurrency(a);
       const sumRub = (pred) => transactions.filter(pred).reduce((sum, t) => sum + toRub(t.amount, code, rates), 0);
       const openingRub = toRub(a.opening, code, rates);
@@ -549,12 +691,15 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
       const exp = sumRub((t) => t.type === "expense" && t.account === a.name);
       return s + openingRub + inc - exp;
     }, 0);
-  }, [accounts, transactions, rates.usd, rates.eur]);
+  }, [accounts, transactions, rates.usd, rates.eur, securityPrices]);
 
-  // capital as of the end of a given month (opening balances + all income/expense up to that date)
+  // capital as of the end of a given month (opening balances + all income/expense up to that date).
+  // Для Акций/Облигаций историческая цена недоступна — берём текущую стоимость
+  // портфеля на все даты (тот же компромисс, что раньше был с ручным остатком).
   const capitalAtEnd = useCallback((mKeyArg) => {
     const endStr = mKeyArg + "-31";
     return accounts.reduce((s, a) => {
+      if (isSecurityType(a.type)) return s + accountHoldingsValue(a, securityPrices, rates);
       const code = accountCurrency(a);
       const openingRub = toRub(a.opening, code, rates);
       const inc = transactions.filter((t) => t.type === "income" && t.account === a.name && t.date <= endStr)
@@ -563,7 +708,7 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
         .reduce((sum, t) => sum + toRub(t.amount, code, rates), 0);
       return s + openingRub + inc - exp;
     }, 0);
-  }, [accounts, transactions, rates.usd, rates.eur]);
+  }, [accounts, transactions, rates.usd, rates.eur, securityPrices]);
 
   // % change in capital over the selected period (month / half year / year / all time), for the badge next to the total.
   // Для "всё время" сравниваем не с фиксированным числом месяцев назад, а с
@@ -641,6 +786,14 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
               setSelectedMonth={setSelectedMonth}
               availableMonths={availableMonths}
               rates={rates}
+              securityPrices={securityPrices}
+              pricesLoading={pricesLoading}
+              refreshSecurityPrices={refreshSecurityPrices}
+              addHolding={addHolding}
+              removeHolding={removeHolding}
+              setHoldingManualPrice={setHoldingManualPrice}
+              setHoldingCurrency={setHoldingCurrency}
+              adjustHoldingQuantity={adjustHoldingQuantity}
             />
           )}
           {tab === "income" && (
@@ -672,7 +825,7 @@ function TrackerApp({ userId, userEmail, onSignOut, theme, toggleTheme }) {
           )}
           {tab === "transfer" && (
             <TransferPage
-              accounts={accounts}
+              accounts={accounts.filter((a) => TRANSACTABLE_TYPES.includes(a.type))}
               transactions={transactions.filter((t) => t.type === "transfer")}
               addTransaction={addTransaction}
               deleteTransaction={deleteTransaction}
@@ -852,12 +1005,13 @@ function TopNav({ tab, setTab, period, setPeriod, selectedMonth, setSelectedMont
 // ---------------------------------------------------------------------------
 // Summary page
 // ---------------------------------------------------------------------------
-function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod, selectedMonth, setSelectedMonth, rates }) {
+function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod, selectedMonth, setSelectedMonth, rates, securityPrices, pricesLoading, refreshSecurityPrices, addHolding, removeHolding, setHoldingManualPrice, setHoldingCurrency, adjustHoldingQuantity }) {
   const isAllTime = period === "all";
   const periodN = period === "month" ? 1 : period === "half" ? 6 : 12;
   const periodLabel = period === "month" ? "за месяц" : period === "half" ? "за полгода" : period === "year" ? "за год" : "за всё время";
   const [catTab, setCatTab] = useState("expense");
   const [assetView, setAssetView] = useState("pie"); // 'pie' | 'bars'
+  const [expandedSecurity, setExpandedSecurity] = useState(null); // имя счёта "Акции"/"Облигации", чьи позиции сейчас развёрнуты
 
   const income = transactions.filter((t) => t.type === "income");
   const expense = transactions.filter((t) => t.type === "expense");
@@ -891,13 +1045,14 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
     // capital = sum(opening) + income up to end of month - expense up to end of month, всё в рублях
     const endStr = mKeyArg + "-31"; // string compare works since ISO dates, day overshoot is fine for "<="
     return accounts.reduce((s, a) => {
+      if (isSecurityType(a.type)) return s + accountHoldingsValue(a, securityPrices, rates);
       const code = accountCurrency(a);
       const openingRub = toRub(a.opening, code, rates);
       const inc = income.filter((t) => t.account === a.name && t.date <= endStr).reduce((sum, t) => sum + toRub(t.amount, code, rates), 0);
       const exp = expense.filter((t) => t.account === a.name && t.date <= endStr).reduce((sum, t) => sum + toRub(t.amount, code, rates), 0);
       return s + openingRub + inc - exp;
     }, 0);
-  }, [accounts, income, expense, rates.usd, rates.eur]);
+  }, [accounts, income, expense, rates.usd, rates.eur, securityPrices]);
 
   const availableMonths = useMemo(() => {
     const set = new Set(transactions.map((t) => monthKey(t.date)));
@@ -966,6 +1121,15 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
     return Number(acc.opening || 0) + inc - exp + transferIn - transferOut; // в валюте счёта
   };
   const balances = accounts.map((a) => {
+    if (isSecurityType(a.type)) {
+      const value = accountHoldingsValue(a, securityPrices, rates);
+      // цена покупки (avgPrice) указана в той же валюте, что и текущая цена
+      // позиции, поэтому себестоимость тоже переводим в рубли по курсу
+      const costBasis = (a.holdings || []).reduce((s, h) => s + toRub((Number(h.quantity) || 0) * (Number(h.avgPrice) || 0), holdingCurrency(h), rates), 0);
+      const deltaRub = costBasis ? value - costBasis : 0;
+      const deltaPct = costBasis ? deltaRub / Math.abs(costBasis) : null;
+      return { ...a, nativeBalance: value, currencyCode: "RUB", balance: value, deltaRub, deltaPct };
+    }
     const code = accountCurrency(a);
     const nativeBalance = accountBalance(a);
     const balance = toRub(nativeBalance, code, rates);
@@ -1202,24 +1366,51 @@ function SummaryPage({ transactions, accounts, goal, setGoal, period, setPeriod,
         <div>
           {balances.map((a) => {
             const isCur = a.currencyCode !== "RUB";
+            const isSecurity = isSecurityType(a.type);
+            const isOpen = expandedSecurity === a.name;
             return (
-              <div key={a.id} className="grid grid-cols-2 items-center gap-x-2 gap-y-1.5 py-2.5 text-sm group sm:grid-cols-[1fr_minmax(140px,auto)] sm:gap-2 sm:py-1.5" style={{ borderBottom: `1px solid ${COLORS.border}` }}>
-                <div className="flex items-center gap-2 min-w-0 col-span-2 sm:col-span-1">
-                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: TYPE_COLOR[a.type] }} />
-                  <span className="truncate font-medium">{a.name}</span>
-                  {isCur && <span className="text-xs shrink-0" style={{ color: COLORS.sub }}>({a.currencyCode})</span>}
-                </div>
-                <div className="text-right col-span-2 sm:col-span-1 flex items-center justify-end gap-2">
-                  <div>
-                    <div className="font-semibold tabular-nums">{isCur ? fmtCur(a.nativeBalance, a.currencyCode) : fmtRubNoSym(a.balance)}</div>
-                    {isCur && <div className="text-xs tabular-nums" style={{ color: COLORS.sub }}>≈ {fmtRubNoSym(a.balance)}</div>}
+              <div key={a.id}>
+                <div
+                  className="grid grid-cols-2 items-center gap-x-2 gap-y-1.5 py-2.5 text-sm group sm:grid-cols-[1fr_minmax(140px,auto)] sm:gap-2 sm:py-1.5"
+                  style={{ borderBottom: isSecurity && isOpen ? "none" : `1px solid ${COLORS.border}`, cursor: isSecurity ? "pointer" : "default" }}
+                  onClick={isSecurity ? () => setExpandedSecurity(isOpen ? null : a.name) : undefined}
+                >
+                  <div className="flex items-center gap-2 min-w-0 col-span-2 sm:col-span-1">
+                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: TYPE_COLOR[a.type] }} />
+                    <span className="truncate font-medium">{a.name}</span>
+                    {isCur && <span className="text-xs shrink-0" style={{ color: COLORS.sub }}>({a.currencyCode})</span>}
+                    {isSecurity && (
+                      <ChevronDown size={14} style={{ color: COLORS.sub, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+                    )}
                   </div>
-                  {a.deltaRub !== 0 && (
-                    <span className="text-xs font-semibold tabular-nums shrink-0" style={{ color: a.deltaRub > 0 ? COLORS.green : COLORS.red }}>
-                      {fmtRubSignedNoSym(a.deltaRub)}{a.deltaPct !== null ? ` (${fmtPct(a.deltaPct)})` : ""}
-                    </span>
-                  )}
+                  <div className="text-right col-span-2 sm:col-span-1 flex items-center justify-end gap-2">
+                    <div>
+                      <div className="font-semibold tabular-nums">{isCur ? fmtCur(a.nativeBalance, a.currencyCode) : fmtRubNoSym(a.balance)}</div>
+                      {isCur && <div className="text-xs tabular-nums" style={{ color: COLORS.sub }}>≈ {fmtRubNoSym(a.balance)}</div>}
+                    </div>
+                    {a.deltaRub !== 0 && (
+                      <span className="text-xs font-semibold tabular-nums shrink-0" style={{ color: a.deltaRub > 0 ? COLORS.green : COLORS.red }}>
+                        {fmtRubSignedNoSym(a.deltaRub)}{a.deltaPct !== null ? ` (${fmtPct(a.deltaPct)})` : ""}
+                      </span>
+                    )}
+                  </div>
                 </div>
+                {isSecurity && isOpen && (
+                  <div className="pb-3" style={{ borderBottom: `1px solid ${COLORS.border}` }}>
+                    <SecurityHoldingsEditor
+                      account={a}
+                      securityPrices={securityPrices}
+                      pricesLoading={pricesLoading}
+                      rates={rates}
+                      onRefresh={refreshSecurityPrices}
+                      onAdd={(h) => addHolding(a.name, h)}
+                      onRemove={(id) => removeHolding(a.name, id)}
+                      onSetManualPrice={(id, p) => setHoldingManualPrice(a.name, id, p)}
+                      onSetCurrency={(id, c) => setHoldingCurrency(a.name, id, c)}
+                      onAdjustQuantity={(id, deltaQty, dealPrice) => adjustHoldingQuantity(a.name, id, deltaQty, dealPrice)}
+                    />
+                  </div>
+                )}
               </div>
             );
           })}
@@ -1469,8 +1660,165 @@ function RoundUpSettings({ roundUp, setRoundUp, accounts, collected }) {
 }
 
 // ---------------------------------------------------------------------------
-// Transfer page — переброска денег между счетами (пополнение капитала:
-// накопительный счёт, депозит, акции, ОФЗ и т.п.). Не влияет на доходы/расходы.
+// Портфель ценных бумаг (внутри счетов "Акции"/"Облигации") — список позиций
+// (тикер, количество, цена покупки) + текущая цена. Цена подтягивается с MOEX,
+// но всегда может быть перекрыта вручную (поле "цена" остаётся редактируемым).
+// ---------------------------------------------------------------------------
+function SecurityHoldingsEditor({ account, securityPrices, pricesLoading, rates, onRefresh, onAdd, onRemove, onSetManualPrice, onSetCurrency, onAdjustQuantity }) {
+  const [ticker, setTicker] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [avgPrice, setAvgPrice] = useState("");
+  const [currency, setCurrency] = useState("RUB");
+  // { id, mode: 'add' | 'reduce' } — какая позиция сейчас показывает форму докупки/продажи части
+  const [adjust, setAdjust] = useState(null);
+  const [adjustQty, setAdjustQty] = useState("");
+  const [adjustPrice, setAdjustPrice] = useState("");
+  const holdings = account.holdings || [];
+  const fmtTime = (ms) => (ms ? new Date(ms).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : null);
+
+  const submit = () => {
+    const t = ticker.trim().toUpperCase();
+    if (!t || !quantity || Number(quantity) <= 0) return;
+    onAdd({ ticker: t, quantity: Number(quantity), avgPrice: avgPrice ? Number(avgPrice) : null, manualPrice: null, currency });
+    setTicker(""); setQuantity(""); setAvgPrice(""); setCurrency("RUB");
+    onRefresh([t]);
+  };
+
+  const openAdjust = (id, mode) => {
+    setAdjust((cur) => (cur && cur.id === id && cur.mode === mode ? null : { id, mode }));
+    setAdjustQty(""); setAdjustPrice("");
+  };
+  const submitAdjust = (h) => {
+    const qty = Number(adjustQty);
+    if (!adjustQty || qty <= 0) return;
+    if (adjust.mode === "add") {
+      onAdjustQuantity(h.id, qty, adjustPrice ? Number(adjustPrice) : null);
+    } else {
+      onAdjustQuantity(h.id, -Math.min(qty, Number(h.quantity) || 0), null);
+    }
+    setAdjust(null); setAdjustQty(""); setAdjustPrice("");
+  };
+
+  return (
+    <div className="pt-1 space-y-3" onClick={(e) => e.stopPropagation()}>
+      {holdings.length > 0 && (
+        <div className="space-y-2">
+          {holdings.map((h) => {
+            const code = (h.ticker || "").trim().toUpperCase();
+            const fetched = securityPrices[code];
+            const price = holdingPrice(h, securityPrices);
+            const hCur = holdingCurrency(h);
+            const isCur = hCur !== "RUB";
+            const value = (Number(h.quantity) || 0) * price; // в валюте позиции
+            const valueRub = isCur ? toRub(value, hCur, rates) : value;
+            const usingManual = h.manualPrice !== undefined && h.manualPrice !== null && h.manualPrice !== "";
+            const isAdjusting = adjust && adjust.id === h.id;
+            return (
+              <div key={h.id}>
+                <div className="flex items-center gap-2 text-xs flex-wrap">
+                  <span className="font-semibold shrink-0" style={{ maxWidth: "100%" }}>{code}</span>
+                  <span className="shrink-0 tabular-nums" style={{ color: COLORS.sub }}>{fmtRubNoSym(Number(h.quantity) || 0)} шт</span>
+                  <div className="flex items-center gap-0.5 shrink-0">
+                    <button onClick={() => openAdjust(h.id, "add")} title="Докупить" className="p-0.5 rounded focus:outline-none" style={{ color: isAdjusting && adjust.mode === "add" ? COLORS.green : COLORS.sub, background: isAdjusting && adjust.mode === "add" ? COLORS.greenBg : "transparent" }}>
+                      <Plus size={12} />
+                    </button>
+                    <button onClick={() => openAdjust(h.id, "reduce")} title="Продать часть" className="p-0.5 rounded focus:outline-none" style={{ color: isAdjusting && adjust.mode === "reduce" ? COLORS.red : COLORS.sub, background: isAdjusting && adjust.mode === "reduce" ? COLORS.redBg : "transparent" }}>
+                      <Minus size={12} />
+                    </button>
+                  </div>
+                  <span className="shrink-0" style={{ color: COLORS.sub }}>×</span>
+                  <input
+                    type="text" inputMode="decimal"
+                    value={usingManual ? h.manualPrice : (price ? String(price) : "")}
+                    onChange={(e) => onSetManualPrice(h.id, sanitizeAmountInput(e.target.value))}
+                    placeholder="цена"
+                    className="w-20 px-1.5 py-1 rounded-md text-xs"
+                    style={{ border: `1px solid ${COLORS.border}`, color: usingManual ? COLORS.text : COLORS.sub }}
+                  />
+                  <select
+                    value={hCur}
+                    onChange={(e) => onSetCurrency(h.id, e.target.value)}
+                    className="px-1 py-1 rounded-md text-xs focus:outline-none"
+                    style={{ border: `1px solid ${COLORS.border}`, color: COLORS.sub, background: "transparent" }}
+                  >
+                    {HOLDING_CURRENCY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  {!usingManual && fetched?.error && <span style={{ color: COLORS.red }}>MOEX: {fetched.error}</span>}
+                  {!usingManual && !fetched?.error && fetched?.price != null && (
+                    <span style={{ color: COLORS.sub }}>(MOEX{fmtTime(fetched.updatedAt) ? `, ${fmtTime(fetched.updatedAt)}` : ""})</span>
+                  )}
+                  {usingManual && (
+                    <button onClick={() => onSetManualPrice(h.id, null)} className="focus:outline-none" style={{ color: COLORS.sub, textDecoration: "underline" }}>авто</button>
+                  )}
+                  <span className="ml-auto text-right">
+                    <span className="font-semibold tabular-nums">{isCur ? fmtCur(value, hCur) : fmtRub(value)}</span>
+                    {isCur && <div className="text-xs tabular-nums font-normal" style={{ color: COLORS.sub }}>≈ {fmtRub(valueRub)}</div>}
+                  </span>
+                  <button onClick={() => onRemove(h.id)} className="p-1 rounded focus:outline-none" style={{ color: COLORS.sub }}>
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+                {isAdjusting && (
+                  <div className="flex items-center gap-2 flex-wrap mt-1.5 ml-16">
+                    <input
+                      type="text" inputMode="decimal" value={adjustQty}
+                      onChange={(e) => setAdjustQty(sanitizeAmountInput(e.target.value))}
+                      placeholder="Кол-во"
+                      className="w-20 px-2 py-1 rounded-md text-xs"
+                      style={{ border: `1px solid ${COLORS.border}` }}
+                      autoFocus
+                    />
+                    {adjust.mode === "add" && (
+                      <input
+                        type="text" inputMode="decimal" value={adjustPrice}
+                        onChange={(e) => setAdjustPrice(sanitizeAmountInput(e.target.value))}
+                        placeholder={`Цена покупки, ${hCur} (опц.)`}
+                        className="w-36 px-2 py-1 rounded-md text-xs"
+                        style={{ border: `1px solid ${COLORS.border}` }}
+                      />
+                    )}
+                    <button
+                      onClick={() => submitAdjust(h)}
+                      className="px-2.5 py-1 rounded-md text-xs font-medium text-white focus:outline-none"
+                      style={{ background: adjust.mode === "add" ? COLORS.green : COLORS.red }}
+                    >
+                      {adjust.mode === "add" ? "Докупить" : "Продать"}
+                    </button>
+                    <button onClick={() => setAdjust(null)} className="px-2 py-1 rounded-md text-xs focus:outline-none" style={{ color: COLORS.sub }}>
+                      Отмена
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="flex items-center gap-2 flex-wrap">
+        <input value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())} placeholder="Тикер"
+          className="min-w-[112px] flex-1 px-2 py-1.5 rounded-md text-xs" style={{ border: `1px solid ${COLORS.border}` }} />
+        <input type="text" inputMode="decimal" value={quantity} onChange={(e) => setQuantity(sanitizeAmountInput(e.target.value))} placeholder="Кол-во"
+          className="w-20 px-2 py-1.5 rounded-md text-xs" style={{ border: `1px solid ${COLORS.border}` }} />
+        <input type="text" inputMode="decimal" value={avgPrice} onChange={(e) => setAvgPrice(sanitizeAmountInput(e.target.value))} placeholder="Цена покупки"
+          className="w-28 px-2 py-1.5 rounded-md text-xs" style={{ border: `1px solid ${COLORS.border}` }} />
+        <select
+          value={currency}
+          onChange={(e) => setCurrency(e.target.value)}
+          className="px-2 py-1.5 rounded-md text-xs focus:outline-none"
+          style={{ border: `1px solid ${COLORS.border}` }}
+        >
+          {HOLDING_CURRENCY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <button onClick={submit} className="flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-medium text-white focus:outline-none" style={{ background: TYPE_COLOR[account.type] }}>
+          <Plus size={13} /> Добавить
+        </button>
+        <button onClick={() => onRefresh()} disabled={pricesLoading} className="px-2 py-1.5 rounded-md text-xs font-medium focus:outline-none" style={{ color: COLORS.sub }}>
+          {pricesLoading ? "Обновляю…" : "Обновить цены"}
+        </button>
+      </div>
+    </div>
+  );
+}
 // ---------------------------------------------------------------------------
 function TransferPage({ accounts, transactions, addTransaction, deleteTransaction, rates }) {
   const [date, setDate] = useState(todayStr());
